@@ -56,8 +56,8 @@ Start with `(tenant_id, status)`, `(tenant_id, created_at)` and
 
 ## Migrations
 
-- Edit `src/db/schema/*.ts`, then `npm run db:generate -w apps/api` to create a
-  SQL migration in `apps/api/drizzle/`. Review it and commit it.
-- `npm run db:migrate -w apps/api` applies pending migrations (also used in deploys).
+- Edit `src/db/schema/*.ts`, then `npm run db:generate` to create a
+  SQL migration in `drizzle/`. Review it and commit it.
+- `npm run db:migrate` applies pending migrations (also used in deploys).
 - Never change a production schema by hand. CI fails if the schema and the
   committed migrations drift.
