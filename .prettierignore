@@ -1,0 +1,8 @@
+node_modules
+dist
+coverage
+legacy
+docs/architecture/source-notes
+docs/api/openapi.json
+drizzle
+package-lock.json

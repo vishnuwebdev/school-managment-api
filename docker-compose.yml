@@ -1,0 +1,54 @@
+# Local development stack: `docker compose up --build`
+#   API    http://localhost:4000   (OpenAPI at /openapi.json)
+#   MySQL  localhost:3306  (sms / sms, root / root)
+#   Redis  localhost:6379
+# The migrate service applies migrations and seeds reference data + the first Super Admin.
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: sms_dev
+      MYSQL_USER: sms
+      MYSQL_PASSWORD: sms
+    ports: ['3306:3306']
+    volumes: [mysql-data:/var/lib/mysql]
+    healthcheck:
+      test: ['CMD', 'mysqladmin', 'ping', '-h', 'localhost', '-usms', '-psms']
+      interval: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports: ['6379:6379']
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      retries: 20
+
+  migrate:
+    build: .
+    command: ['sh', '-c', 'node dist/db/migrate.js && node dist/db/seed.js']
+    env_file: .env.docker
+    depends_on:
+      mysql: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  api:
+    build: .
+    env_file: .env.docker
+    ports: ['4000:4000']
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+
+  worker:
+    build: .
+    command: ['node', 'dist/worker.js']
+    env_file: .env.docker
+    healthcheck:
+      test: ['CMD', 'node', '-e', 'process.exit(0)']
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+
+volumes:
+  mysql-data:
