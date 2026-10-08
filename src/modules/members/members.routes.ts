@@ -1,22 +1,39 @@
 import type { Request } from 'express';
 import { z } from 'zod';
-import { MEMBERSHIP_STATUS, SCOPE_TYPE } from '../../db/schema/index.js';
+import { MEMBERSHIP_STATUS } from '../../db/schema/index.js';
 import { defineRoute } from '../../http/route.js';
 import { actorFrom } from '../../platform/context.js';
 import { PaginationQuery } from '../../shared/pagination.js';
+import { TENANT_SCOPE_TYPES } from '../access/scope-policy.js';
 import type { MemberService } from './members.service.js';
 
+const ScopeIds = z.array(z.string().uuid()).min(1).max(200);
+/**
+ * Where the role applies (D55). ASSIGNED_SECTION takes `{ "section_ids": [...] }`,
+ * ASSIGNED_CLASS `{ "class_ids": [...] }`; with no scope_ref they mean "the
+ * sections / classes this person teaches". ALL_TENANT and OWN_RECORD take none.
+ * Ids must belong to this school; a role with permissions that only work
+ * school-wide cannot be limited (422 OPERATION_NOT_ALLOWED, reason SCOPE_NOT_SUPPORTED).
+ */
 const Assignment = z.object({
   role_id: z.string().uuid(),
-  scope_type: z.enum(SCOPE_TYPE).exclude(['ALL_TENANTS', 'SELECTED_TENANTS']).default('ALL_TENANT'),
-  /** e.g. { "section_ids": ["…"] } when scope_type is ASSIGNED_SECTION. */
+  scope_type: z.enum(TENANT_SCOPE_TYPES).default('ALL_TENANT'),
   scope_ref: z
-    .record(z.string(), z.array(z.string().max(64)).max(200))
+    .object({ section_ids: ScopeIds.optional(), class_ids: ScopeIds.optional() })
+    .strict()
     .nullable()
     .optional(),
 });
 const toAssignments = (list: z.infer<typeof Assignment>[]) =>
-  list.map((a) => ({ roleId: a.role_id, scopeType: a.scope_type, scopeRef: a.scope_ref ?? null }));
+  list.map((a) => ({
+    roleId: a.role_id,
+    scopeType: a.scope_type,
+    scopeRef: a.scope_ref
+      ? Object.fromEntries(
+          Object.entries(a.scope_ref).filter((e): e is [string, string[]] => e[1] !== undefined),
+        )
+      : null,
+  }));
 
 const InviteBody = z.object({
   email: z.email().max(254),

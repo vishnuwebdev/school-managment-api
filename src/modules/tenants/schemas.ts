@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { PaymentBody } from '../billing/billing.schemas.js';
 import { BILLING_INTERVAL } from '../../db/schema/index.js';
 
 const nullableText = (max: number) => z.string().trim().max(max).nullable().optional();
@@ -30,11 +31,43 @@ export const CreateTenantBody = z.object({
   ...TenantProfileFields,
 });
 
+const phone = z
+  .string()
+  .trim()
+  .regex(/^[+0-9()\-\s]{5,32}$/, 'Enter a valid phone number')
+  .nullable()
+  .optional();
+
+/** Extra identity and contact details (§12.1, §12.2). Empty strings clear a field. */
+export const ProfileExtrasBody = z.object({
+  affiliation_board: nullableText(64),
+  affiliation_number: nullableText(64),
+  school_code: nullableText(64),
+  established_year: z.number().int().min(1700).max(2100).nullable().optional(),
+  medium_of_instruction: nullableText(100),
+  motto: nullableText(200),
+  about: nullableText(4000),
+  secondary_phone: phone,
+  landline: phone,
+  reception_phone: phone,
+  alternate_email: z.email().max(254).nullable().optional(),
+  contact_person_name: nullableText(200),
+  contact_person_role: nullableText(100),
+  document_footer: nullableText(500),
+});
+
 export const UpdateTenantBody = z.object({
   version: z.number().int().positive(),
   ...TenantProfileFields,
   name: TenantProfileFields.name.optional(),
+  profile: ProfileExtrasBody.optional(),
 });
+
+const hexColor = z
+  .string()
+  .regex(/^#[0-9A-Fa-f]{6}$/, 'Use a colour like #1A73E8')
+  .nullable()
+  .optional();
 
 export const SettingsBody = z.object({
   version: z.number().int().positive(),
@@ -57,11 +90,9 @@ export const SettingsBody = z.object({
     .max(7)
     .optional(),
   academic_year_start_month: z.number().int().min(1).max(12).optional(),
-  brand_primary_color: z
-    .string()
-    .regex(/^#[0-9A-Fa-f]{6}$/)
-    .nullable()
-    .optional(),
+  brand_primary_color: hexColor,
+  brand_secondary_color: hexColor,
+  brand_accent_color: hexColor,
 });
 
 export const ProvisionBody = z.object({
@@ -75,6 +106,10 @@ export const ProvisionBody = z.object({
     last_name: z.string().trim().max(100).optional(),
   }),
   settings: SettingsBody.omit({ version: true }).optional(),
+  /** Price reduction agreed with the school, in minor units (paid subscriptions only). */
+  discount_minor: z.number().int().min(0).optional(),
+  /** A payment already received offline for this subscription (paid subscriptions only). */
+  payment: PaymentBody.optional(),
 });
 
 export const ChangeSubscriptionBody = z.object({
@@ -88,6 +123,8 @@ export const ChangeSubscriptionBody = z.object({
   /** Required when the change removes features the school currently has. */
   confirm: z.boolean().optional(),
   reason: z.string().trim().min(3).max(500),
+  discount_minor: z.number().int().min(0).optional(),
+  payment: PaymentBody.optional(),
 });
 
 export const ReasonBody = z.object({ reason: z.string().trim().min(3).max(500) });

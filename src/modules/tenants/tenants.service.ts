@@ -11,6 +11,7 @@ import {
   schoolRequests,
   subscriptionItems,
   subscriptions,
+  tenantProfiles,
   tenantSettings,
   tenantStatusHistory,
   tenants,
@@ -25,14 +26,17 @@ import {
   ConflictError,
   isDuplicateKeyError,
   NotFoundError,
+  ValidationError,
 } from '../../shared/errors.js';
 import { offsetOf, orderFrom, pageOf, type PaginationQuery } from '../../shared/pagination.js';
 import { addDays } from '../../shared/time.js';
 import type { AuthorizationService } from '../access/authorization.service.js';
+import type { PaymentInput } from '../billing/billing.schemas.js';
+import type { BillingService } from '../billing/billing.service.js';
 import type { EntitlementService } from '../entitlements/entitlements.service.js';
 import { inviteMember } from '../members/invitations.js';
 import { assertTransition } from './lifecycle.js';
-import { presentSettings, presentTenant } from './presenters.js';
+import { presentProfileExtras, presentSettings, presentTenant } from './presenters.js';
 import type {
   ChangeSubscriptionBody,
   CreateTenantBody,
@@ -75,6 +79,39 @@ function settingsColumns(input: Partial<z.infer<typeof SettingsBody>>) {
   if (input.academic_year_start_month !== undefined)
     out.academicYearStartMonth = input.academic_year_start_month;
   if (input.brand_primary_color !== undefined) out.brandPrimaryColor = input.brand_primary_color;
+  if (input.brand_secondary_color !== undefined)
+    out.brandSecondaryColor = input.brand_secondary_color;
+  if (input.brand_accent_color !== undefined) out.brandAccentColor = input.brand_accent_color;
+  return out;
+}
+
+type ProfileExtrasInput = NonNullable<z.infer<typeof UpdateTenantBody>['profile']>;
+
+/** Blank strings clear a field, so the form can send what the user typed. */
+const clean = <T>(v: T): T | null => (typeof v === 'string' && v.trim() === '' ? null : v);
+
+function profileExtrasColumns(input: ProfileExtrasInput) {
+  const out: Partial<typeof tenantProfiles.$inferInsert> = {};
+  const set = <K extends keyof typeof tenantProfiles.$inferInsert>(
+    key: K,
+    v: (typeof tenantProfiles.$inferInsert)[K] | undefined,
+  ) => {
+    if (v !== undefined) out[key] = clean(v) as (typeof tenantProfiles.$inferInsert)[K];
+  };
+  set('affiliationBoard', input.affiliation_board);
+  set('affiliationNumber', input.affiliation_number);
+  set('schoolCode', input.school_code);
+  set('establishedYear', input.established_year);
+  set('mediumOfInstruction', input.medium_of_instruction);
+  set('motto', input.motto);
+  set('about', input.about);
+  set('secondaryPhone', input.secondary_phone);
+  set('landline', input.landline);
+  set('receptionPhone', input.reception_phone);
+  set('alternateEmail', input.alternate_email);
+  set('contactPersonName', input.contact_person_name);
+  set('contactPersonRole', input.contact_person_role);
+  set('documentFooter', input.document_footer);
   return out;
 }
 
@@ -83,6 +120,7 @@ export class TenantService {
     private readonly deps: Deps,
     private readonly entitlements: EntitlementService,
     private readonly authz: AuthorizationService,
+    private readonly billing: BillingService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -137,9 +175,14 @@ export class TenantService {
       .where(
         and(eq(memberships.tenantId, tenantId), inArray(memberships.status, ['ACTIVE', 'INVITED'])),
       );
+    const [profile] = await this.deps.db
+      .select()
+      .from(tenantProfiles)
+      .where(eq(tenantProfiles.tenantId, tenantId));
     const snapshot = await this.entitlements.snapshot(tenantId);
     return {
       ...presentTenant(tenant),
+      profile: presentProfileExtras(profile),
       settings: settings ? presentSettings(settings) : null,
       member_count: members?.n ?? 0,
       entitlements: presentSnapshot(snapshot),
@@ -233,6 +276,10 @@ export class TenantService {
   async updateProfile(tenantId: string, input: z.infer<typeof UpdateTenantBody>, actor: Actor) {
     return this.deps.db.transaction(async (tx) => {
       const before = await this.getRow(tenantId, tx);
+      const [extrasBefore] = await tx
+        .select()
+        .from(tenantProfiles)
+        .where(eq(tenantProfiles.tenantId, tenantId));
       const changes = profileColumns(input);
       const [res] = await tx
         .update(tenants)
@@ -240,16 +287,27 @@ export class TenantService {
         .where(and(eq(tenants.id, tenantId), eq(tenants.version, input.version)));
       if (res.affectedRows !== 1)
         throw new ConflictError('CONFLICT', undefined, { current_version: before.version });
+      const extras = input.profile ? profileExtrasColumns(input.profile) : {};
+      if (Object.keys(extras).length > 0) {
+        await tx
+          .insert(tenantProfiles)
+          .values({ tenantId, ...extras, updatedBy: actor.userId })
+          .onDuplicateKeyUpdate({ set: { ...extras, updatedBy: actor.userId } });
+      }
       const after = await this.getRow(tenantId, tx);
+      const [extrasAfter] = await tx
+        .select()
+        .from(tenantProfiles)
+        .where(eq(tenantProfiles.tenantId, tenantId));
       await recordAudit(tx, actor, {
         tenantId,
         action: 'TENANT_UPDATED',
         entityType: 'tenant',
         entityId: tenantId,
-        before: presentTenant(before),
-        after: presentTenant(after),
+        before: { ...presentTenant(before), profile: presentProfileExtras(extrasBefore) },
+        after: { ...presentTenant(after), profile: presentProfileExtras(extrasAfter) },
       });
-      return presentTenant(after);
+      return { ...presentTenant(after), profile: presentProfileExtras(extrasAfter) };
     });
   }
 
@@ -392,7 +450,7 @@ export class TenantService {
           .where(eq(tenantSettings.tenantId, tenantId));
       }
 
-      const subscriptionId = await this.startSubscription(
+      const started = await this.startSubscription(
         tx,
         tenantId,
         {
@@ -401,8 +459,10 @@ export class TenantService {
           billingInterval: input.billing_interval,
           trialDays: input.trial_days,
           autoRenew: true,
+          discountMinor: input.discount_minor,
+          payment: input.payment,
         },
-        actor,
+        { ...actor, tenantId },
       );
 
       const [adminRole] = await tx
@@ -437,7 +497,8 @@ export class TenantService {
         entityId: tenantId,
         after: {
           plan_code: input.plan_code,
-          subscription_id: subscriptionId,
+          subscription_id: started.id,
+          invoice_id: started.invoiceId,
           admin_email: input.admin.email,
         },
       });
@@ -448,12 +509,13 @@ export class TenantService {
         aggregateId: tenantId,
         payload: {
           tenant_id: tenantId,
-          subscription_id: subscriptionId,
+          subscription_id: started.id,
           admin_membership_id: invite.membershipId,
         },
       });
       return {
-        subscriptionId,
+        subscriptionId: started.id,
+        invoiceId: started.invoiceId,
         adminMembershipId: invite.membershipId,
         invitationId: invite.invitationId,
       };
@@ -465,6 +527,7 @@ export class TenantService {
     return {
       tenant: await this.detail(tenantId),
       subscription_id: result.subscriptionId,
+      invoice_id: result.invoiceId,
       admin_membership_id: result.adminMembershipId,
       invitation_id: result.invitationId,
     };
@@ -507,7 +570,7 @@ export class TenantService {
           .where(eq(subscriptions.id, sub.id));
         await this.entitlements.revokeSubscriptionSourced(tx, tenantId, sub.id);
       }
-      const newId = await this.startSubscription(
+      const started = await this.startSubscription(
         tx,
         tenantId,
         {
@@ -517,8 +580,10 @@ export class TenantService {
           trialDays: input.trial_days ?? 14,
           periodEnd: input.current_period_end,
           autoRenew: input.auto_renew,
+          discountMinor: input.discount_minor,
+          payment: input.payment,
         },
-        actor,
+        { ...actor, tenantId },
       );
       // A downgrade must never switch features off silently.
       const after = await this.entitlements.compute(tenantId, tx);
@@ -534,16 +599,17 @@ export class TenantService {
         tenantId,
         action: 'SUBSCRIPTION_CHANGED',
         entityType: 'subscription',
-        entityId: newId,
+        entityId: started.id,
         before: open.map((s) => ({ id: s.id, status: s.status })),
         after: { plan_code: input.plan_code, status: input.status },
         reason: input.reason,
       });
-      return newId;
+      return started;
     });
     await this.entitlements.invalidate(tenantId);
     return {
-      subscription_id: id,
+      subscription_id: id.id,
+      invoice_id: id.invoiceId,
       entitlements: presentSnapshot(await this.entitlements.snapshot(tenantId)),
     };
   }
@@ -614,9 +680,11 @@ export class TenantService {
       trialDays: number;
       periodEnd?: Date;
       autoRenew: boolean;
+      discountMinor?: number;
+      payment?: PaymentInput;
     },
     actor: Actor,
-  ) {
+  ): Promise<{ id: string; invoiceId: string | null }> {
     const now = this.deps.clock.now();
     const [version] = await tx
       .select({
@@ -624,6 +692,7 @@ export class TenantService {
         currency: planVersions.currency,
         monthly: planVersions.priceMonthlyMinor,
         annual: planVersions.priceAnnualMinor,
+        planName: plans.name,
       })
       .from(planVersions)
       .innerJoin(plans, eq(plans.id, planVersions.planId))
@@ -670,13 +739,19 @@ export class TenantService {
         : input.billingInterval === 'MONTHLY'
           ? version.monthly
           : version.annual;
+    const discount = input.discountMinor ?? 0;
+    if (input.status === 'TRIAL' && (discount > 0 || input.payment))
+      throw new ValidationError('A trial has nothing to pay. Start a paid subscription instead.');
+    if (discount > 0 && discount >= price)
+      throw new ValidationError('The discount must be smaller than the price');
     await tx.insert(subscriptionItems).values({
       subscriptionId: row!.id,
       tenantId,
       itemType: 'PLAN',
       currency: version.currency,
       standardPriceMinor: price,
-      finalPriceMinor: price,
+      discountMinor: discount,
+      finalPriceMinor: price - discount,
       startsAt: now,
       endsAt: periodEnd,
     });
@@ -693,7 +768,30 @@ export class TenantService {
         status: input.status,
       },
     });
-    return row!.id;
+
+    // A paid subscription is invoiced straight away; any payment already received is recorded with it.
+    let invoiceId: string | null = null;
+    if (input.status === 'ACTIVE' && price > 0) {
+      const interval = { MONTHLY: 'monthly', ANNUAL: 'annual', CUSTOM: 'custom-term' }[
+        input.billingInterval
+      ];
+      const invoice = await this.billing.createInvoice(tx, actor, {
+        tenantId,
+        subscriptionId: row!.id,
+        description: `${version.planName} plan, ${interval} subscription`,
+        planName: version.planName,
+        currency: version.currency,
+        subtotalMinor: price,
+        discountMinor: discount,
+        periodStart: now,
+        periodEnd,
+      });
+      invoiceId = invoice.id;
+      if (input.payment) await this.billing.recordPaymentTx(tx, actor, invoice.id, input.payment);
+    } else if (input.payment) {
+      throw new ValidationError('There is no invoice to record this payment against');
+    }
+    return { id: row!.id, invoiceId };
   }
 
   async subscriptions(tenantId: string) {

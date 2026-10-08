@@ -1,0 +1,6 @@
+import { StaffImportService } from './src/modules/teachers/import.service.ts';
+const svc: any = new StaffImportService({} as never, {} as never, {} as never);
+const rows = await svc.parse(await svc.template(), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+console.log(rows[0].first_name, rows[0].joining_date);
+const r2 = await svc.parse(Buffer.from('first_name,last_name,joining_date\nA,B,2026-01-02\n'), 'text/csv');
+console.log(r2[0].joining_date);

@@ -34,7 +34,14 @@ export interface EntitlementSnapshot {
   };
   features: string[];
   blocked: BlockedFeature[];
+  /** Plan limits of the governing subscription; null = unlimited. */
+  limits?: PlanLimits;
   resolvedAt: string;
+}
+
+export interface PlanLimits {
+  maxStaffUsers: number | null;
+  maxStudents: number | null;
 }
 
 /**
@@ -50,6 +57,7 @@ export function resolveEntitlements(input: {
   rows: EntitlementRow[];
   subscription: EffectiveSubscription;
   planCode: string | null;
+  limits?: PlanLimits;
   now: Date;
 }): EntitlementSnapshot {
   const { catalog, rows, subscription, now } = input;
@@ -106,6 +114,7 @@ export function resolveEntitlements(input: {
     },
     features: [...granted].sort(),
     blocked,
+    limits: input.limits ?? { maxStaffUsers: null, maxStudents: null },
     resolvedAt: now.toISOString(),
   };
 }
@@ -138,6 +147,10 @@ export function presentSnapshot(s: EntitlementSnapshot) {
     },
     features: s.features,
     blocked: s.blocked,
+    limits: {
+      max_staff_users: s.limits?.maxStaffUsers ?? null,
+      max_students: s.limits?.maxStudents ?? null,
+    },
     resolved_at: s.resolvedAt,
   };
 }

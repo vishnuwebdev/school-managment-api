@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import { migrate } from 'drizzle-orm/mysql2/migrator';
 import { Redis } from 'ioredis';
 import mysql from 'mysql2/promise';
@@ -21,7 +22,7 @@ export default async function setup() {
   await admin.end();
 
   const { db, pool } = createDatabase(url.toString());
-  await migrate(db, { migrationsFolder: new URL('../drizzle', import.meta.url).pathname });
+  await migrate(db, { migrationsFolder: fileURLToPath(new URL('../drizzle', import.meta.url)) });
   await seedCatalog(db);
   await pool.end();
 

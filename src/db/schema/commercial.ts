@@ -89,6 +89,9 @@ export const planVersions = mysqlTable(
     currency: char('currency', { length: 3 }).notNull(),
     priceMonthlyMinor: bigint('price_monthly_minor', { mode: 'number' }).notNull(),
     priceAnnualMinor: bigint('price_annual_minor', { mode: 'number' }).notNull(),
+    /** Plan limits; null = unlimited. Checked when staff are invited / students are admitted. */
+    maxStaffUsers: int('max_staff_users'),
+    maxStudents: int('max_students'),
     effectiveFrom: dt('effective_from').notNull(),
     effectiveTo: dt('effective_to'),
     createdAt: createdAt(),

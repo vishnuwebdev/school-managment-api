@@ -73,6 +73,8 @@ export function roleRoutes(rolesSvc: RoleService) {
         name: z.string().trim().min(2).max(100).optional(),
         description: z.string().trim().max(500).nullable().optional(),
         permissions: PermissionList.optional(),
+        /** Required when the permissions change (who gains or loses what, and why). */
+        reason: z.string().trim().min(3).max(500).optional(),
       }),
       handler: async ({ params, body, req }) => ({
         data: await rolesSvc.update(

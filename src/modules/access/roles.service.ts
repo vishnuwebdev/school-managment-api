@@ -17,9 +17,11 @@ import {
   isDuplicateKeyError,
   NotFoundError,
   AuthorizationError,
+  ValidationError,
 } from '../../shared/errors.js';
 import { adminCount, assertAdminSurvives, lockAdminScope } from './admin-guard.js';
 import { scopeOfPermission, type AuthorizationService } from './authorization.service.js';
+import { isWideScope, unsupportedPermissions } from './scope-policy.js';
 import type { ScopeRef, ScopeType } from '../../db/schema/index.js';
 
 export interface RoleView {
@@ -244,6 +246,13 @@ export class RoleService {
           entityId: row!.id,
           after: { name: input.name, permissions: perms.map((p) => p.code).sort() },
         });
+        await publishEvent(tx, actor, {
+          tenantId,
+          eventType: 'role.created',
+          aggregateType: 'role',
+          aggregateId: row!.id,
+          payload: { role_id: row!.id, permissions: perms.map((p) => p.code).sort() },
+        });
         return row!.id;
       });
       return this.get(tenantId, id);
@@ -259,7 +268,13 @@ export class RoleService {
   async update(
     tenantId: string | null,
     roleId: string,
-    input: { version: number; name?: string; description?: string | null; permissions?: string[] },
+    input: {
+      version: number;
+      name?: string;
+      description?: string | null;
+      permissions?: string[];
+      reason?: string;
+    },
     principal: Principal,
     actor: Actor,
   ) {
@@ -292,6 +307,7 @@ export class RoleService {
       if (input.permissions) {
         assertCanGrant(principal, input.permissions);
         const perms = await this.resolvePermissionIds(tx, input.permissions, role.scope);
+        if (tenantId) await this.assertScopedAssignmentsStillValid(tx, roleId, input.permissions);
         await tx.delete(rolePermissions).where(eq(rolePermissions.roleId, roleId));
         if (perms.length)
           await tx
@@ -302,6 +318,18 @@ export class RoleService {
       const after = await this.get(tenantId, roleId, tx);
       const added = after.permissions.filter((p) => !before.permissions.includes(p));
       const removed = before.permissions.filter((p) => !after.permissions.includes(p));
+      // Permission changes alter what every holder of the role can do: say why (Part 4 §4.20).
+      if ((added.length || removed.length) && !input.reason)
+        throw new ValidationError("A reason is required when a role's permissions change", {
+          location: 'body',
+          issues: [
+            {
+              path: 'reason',
+              code: 'required',
+              message: "Say why the role's permissions are changing",
+            },
+          ],
+        });
       await recordAudit(tx, actor, {
         tenantId,
         action: added.length || removed.length ? 'ROLE_PERMISSIONS_CHANGED' : 'ROLE_UPDATED',
@@ -309,6 +337,7 @@ export class RoleService {
         entityId: roleId,
         before: { name: before.name, permissions: before.permissions },
         after: { name: after.name, permissions: after.permissions, added, removed },
+        reason: added.length || removed.length ? input.reason : null,
       });
       if (added.length || removed.length) {
         await publishEvent(tx, actor, {
@@ -323,6 +352,33 @@ export class RoleService {
     });
     await this.authz.invalidateTenant(tenantId);
     return result;
+  }
+
+  /**
+   * A role already given to someone with a narrower-than-school scope cannot gain
+   * permissions that only work school-wide (D55): those users would silently not
+   * receive them. Change those users' scope first, or use a separate role.
+   */
+  private async assertScopedAssignmentsStillValid(tx: Executor, roleId: string, codes: string[]) {
+    const rows = await tx
+      .selectDistinct({ scopeType: roleAssignments.scopeType })
+      .from(roleAssignments)
+      .where(and(eq(roleAssignments.roleId, roleId), eq(roleAssignments.status, 'ACTIVE')));
+    for (const { scopeType } of rows) {
+      if (isWideScope(scopeType)) continue;
+      const unsupported = unsupportedPermissions(codes, scopeType);
+      if (unsupported.length)
+        throw new BusinessRuleError(
+          'OPERATION_NOT_ALLOWED',
+          'Some users have this role for only part of the school, and these permissions only work for the whole school.',
+          {
+            reason: 'SCOPE_NOT_SUPPORTED',
+            role_id: roleId,
+            scope_type: scopeType,
+            permissions: unsupported,
+          },
+        );
+    }
   }
 
   async archive(
@@ -355,6 +411,19 @@ export class RoleService {
         before: { status: 'ACTIVE', member_count: view.member_count },
         after: { status: 'ARCHIVED' },
         reason,
+      });
+      // Everyone holding the role loses its permissions now; consumers find them
+      // through the role's ACTIVE assignments (kept for history).
+      await publishEvent(tx, actor, {
+        tenantId,
+        eventType: 'role.archived',
+        aggregateType: 'role',
+        aggregateId: roleId,
+        payload: {
+          role_id: roleId,
+          member_count: view.member_count,
+          permissions: view.permissions,
+        },
       });
       return this.get(tenantId, roleId, tx);
     });

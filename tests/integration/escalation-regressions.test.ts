@@ -169,54 +169,42 @@ describe('invitation abuse', () => {
 });
 
 describe('anti-escalation on scope, status and cross-tenant roles', () => {
-  it('a section-scoped grantor cannot hand out school-wide or other-section access', async () => {
+  it('user and role administration cannot be limited to sections, so a section-limited grantor cannot exist', async () => {
     const S = await h.provisionSchool();
     const lead = await S.admin.api.post('/roles', {
       name: 'Section Lead',
       permissions: ['attendance.read', 'members.invite', 'members.read', 'roles.assign'],
     });
+    const refused = await S.admin.api.post('/members/invitations', {
+      email: `lead-${Date.now()}@school.test`,
+      first_name: 'Lead',
+      roles: [{ role_id: lead.body.data.id, scope_type: 'ASSIGNED_SECTION' }],
+    });
+    expect(refused.status).toBe(422);
+    expect(refused.body.error.details).toMatchObject({
+      reason: 'SCOPE_NOT_SUPPORTED',
+      permissions: ['members.invite', 'members.read', 'roles.assign'],
+    });
+    // The same permissions school-wide are fine; the section part goes in its own role.
     const helper = await S.admin.api.post('/roles', {
       name: 'Attendance Helper',
       permissions: ['attendance.read'],
     });
-    const sectionLead = await h.addMember(S.admin.api, [
-      {
-        role_id: lead.body.data.id,
-        scope_type: 'ASSIGNED_SECTION',
-        scope_ref: { section_ids: ['7A'] },
-      },
+    const userAdmin = await S.admin.api.post('/roles', {
+      name: 'User Admin',
+      permissions: ['members.invite', 'members.read', 'roles.assign'],
+    });
+    const grantor = await h.addMember(S.admin.api, [
+      { role_id: userAdmin.body.data.id },
+      { role_id: helper.body.data.id, scope_type: 'ASSIGNED_SECTION' },
     ]);
-
-    const wide = await sectionLead.api.post('/members/invitations', {
+    // …but attendance stays limited for them, so they cannot hand it out school-wide.
+    const wide = await grantor.api.post('/members/invitations', {
       email: `w-${Date.now()}@school.test`,
       first_name: 'W',
       roles: [{ role_id: helper.body.data.id }],
     });
     expect(wide.status).toBe(403);
-    const other = await sectionLead.api.post('/members/invitations', {
-      email: `o-${Date.now()}@school.test`,
-      first_name: 'O',
-      roles: [
-        {
-          role_id: helper.body.data.id,
-          scope_type: 'ASSIGNED_SECTION',
-          scope_ref: { section_ids: ['8B'] },
-        },
-      ],
-    });
-    expect(other.status).toBe(403);
-    const same = await sectionLead.api.post('/members/invitations', {
-      email: `s-${Date.now()}@school.test`,
-      first_name: 'S',
-      roles: [
-        {
-          role_id: helper.body.data.id,
-          scope_type: 'ASSIGNED_SECTION',
-          scope_ref: { section_ids: ['7A'] },
-        },
-      ],
-    });
-    expect(same.status).toBe(201);
   });
 
   it('suspending or reactivating someone requires holding their permissions', async () => {

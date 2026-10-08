@@ -11,7 +11,14 @@ import { createRedis } from './infrastructure/redis.js';
  * payload contents for authorization.
  */
 const deps = createDeps();
-const connection = createRedis(deps.env.REDIS_URL, { forQueue: true });
+const redisUrl = deps.env.REDIS_URL;
+if (!redisUrl) {
+  // Without Redis the API processes outbox events itself; this worker is not needed.
+  deps.log.info('REDIS_URL not set: the API sends outbox events itself, so the worker is not needed. Exiting.');
+  await closeDeps(deps);
+  process.exit(0);
+}
+const connection = createRedis(redisUrl, { forQueue: true });
 const queue = createEventsQueue(connection);
 
 const worker = new Worker<EventJob>(
@@ -19,7 +26,7 @@ const worker = new Worker<EventJob>(
   async (job) => {
     await processEvent(deps, job.data.event_id);
   },
-  { connection: createRedis(deps.env.REDIS_URL, { forQueue: true }), concurrency: 5 },
+  { connection: createRedis(redisUrl, { forQueue: true }), concurrency: 5 },
 );
 worker.on('failed', (job, err) =>
   deps.log.error({ err, jobId: job?.id, event: job?.data }, 'event job failed'),

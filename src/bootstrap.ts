@@ -3,18 +3,24 @@ import type { Deps } from './container.js';
 import { createDatabase } from './db/client.js';
 import { RedisCache, noCache } from './infrastructure/cache.js';
 import { ConsoleMailer, MemoryMailer, type Mailer } from './infrastructure/mail/mailer.js';
+import type { FileStorage } from './infrastructure/storage/storage.js';
+import { createStorage } from './infrastructure/storage/storage.js';
 import { createRedis } from './infrastructure/redis.js';
 import { createLogger } from './shared/logger.js';
 import { systemClock, type Clock } from './shared/time.js';
 
-export function createDeps(overrides: { env?: Env; mailer?: Mailer; clock?: Clock } = {}): Deps {
+export function createDeps(
+  overrides: { env?: Env; mailer?: Mailer; clock?: Clock; storage?: FileStorage } = {},
+): Deps {
   const env = overrides.env ?? loadEnv();
   const log = createLogger(env.LOG_LEVEL, env.NODE_ENV === 'development');
   const { db, pool } = createDatabase(env.DATABASE_URL, {
     connectionLimit: env.DATABASE_POOL_SIZE,
   });
-  const redis = createRedis(env.REDIS_URL);
-  redis.on('error', (err) => log.warn({ err }, 'redis error'));
+  // Redis is optional: without REDIS_URL there is no cache and no queue.
+  const redis = env.REDIS_URL ? createRedis(env.REDIS_URL) : null;
+  redis?.on('error', (err) => log.warn({ err }, 'redis error'));
+  if (!redis) log.info('REDIS_URL not set: running without cache; outbox events are processed in-process');
   const mailer =
     overrides.mailer ??
     (env.MAIL_DRIVER === 'memory'
@@ -25,8 +31,9 @@ export function createDeps(overrides: { env?: Env; mailer?: Mailer; clock?: Cloc
     db,
     pool,
     redis,
-    cache: env.CACHE_TTL_SECONDS > 0 ? new RedisCache(redis, log) : noCache,
+    cache: redis && env.CACHE_TTL_SECONDS > 0 ? new RedisCache(redis, log) : noCache,
     mailer,
+    storage: overrides.storage ?? createStorage(env),
     log,
     clock: overrides.clock ?? systemClock,
   };

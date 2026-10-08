@@ -3,6 +3,7 @@ import type { Redis } from 'ioredis';
 import type { Env } from './config/env.js';
 import type { Database } from './db/client.js';
 import type { Cache } from './infrastructure/cache.js';
+import type { FileStorage } from './infrastructure/storage/storage.js';
 import type { Mailer } from './infrastructure/mail/mailer.js';
 import type { Logger } from './shared/logger.js';
 import type { Clock } from './shared/time.js';
@@ -18,6 +19,7 @@ export interface Deps {
   redis: Redis | null;
   cache: Cache;
   mailer: Mailer;
+  storage: FileStorage;
   log: Logger;
   clock: Clock;
 }

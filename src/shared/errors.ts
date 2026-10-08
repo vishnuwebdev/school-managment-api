@@ -21,6 +21,7 @@ export type ErrorCode =
   | 'CONFLICT'
   | 'INVALID_STATE'
   | 'OPERATION_NOT_ALLOWED'
+  | 'PLAN_LIMIT_REACHED'
   | 'CONFIRMATION_REQUIRED'
   | 'RATE_LIMITED'
   | 'EXTERNAL_SERVICE_ERROR'
@@ -97,7 +98,7 @@ export class ConflictError extends AppError {
 
 export class BusinessRuleError extends AppError {
   constructor(
-    code: Extract<ErrorCode, 'INVALID_STATE' | 'OPERATION_NOT_ALLOWED'>,
+    code: Extract<ErrorCode, 'INVALID_STATE' | 'OPERATION_NOT_ALLOWED' | 'PLAN_LIMIT_REACHED'>,
     message: string,
     details: unknown = null,
   ) {

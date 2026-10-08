@@ -1,6 +1,6 @@
 # Phase 1 review — platform core
 
-**Status:** complete. 73 automated tests pass against real MySQL 8 + Redis.
+**Status:** complete. 245 automated tests pass against real MySQL 8 + Redis (the Phase 1 core plus the Students, Academic, Teachers, Attendance and Timetable modules built on it since).
 The design is applied in place to `api/` and `admin-panel-repo/`.
 
 **Milestone proven:** Platform Admin → create school → provision → invite School
@@ -16,7 +16,7 @@ Admin → admin accepts → signs in → school context with permissions and fea
 | Identity         | Login (lockout), rotating refresh tokens (absolute 30-day and 7-day idle limits, theft detection), logout, sessions, change/forgot/reset password, invitations, switching school        |
 | Schools          | Create, profile, settings (optimistic concurrency), lifecycle with history (approve → provision → active ⇄ suspended → archived → restore), public school request + review              |
 | Provisioning     | One transaction: settings → subscription → plan entitlements → first admin invitation → ACTIVE. Failure leaves the school APPROVED and retryable                                        |
-| RBAC             | 85 permissions, 14 system roles (6 platform, 8 school), custom roles, scoped assignments (incl. platform support limited to selected schools), anti-escalation, last-admin protection   |
+| RBAC             | 93 permissions, 14 system roles (6 platform, 8 school), custom roles, scoped assignments (incl. platform support limited to selected schools), anti-escalation, last-admin protection   |
 | Entitlements     | 21 features with a dependency graph, 3 versioned plans, subscriptions (trial / active / superseded / cancelled), overrides, recovery window, confirmation before switching anything off |
 | Shared services  | Append-only audit log (school + platform), transactional outbox, BullMQ worker, idempotent event handlers, tenant-namespaced Redis cache                                                |
 | Admin panel      | Sign-in with school choice and auto-refresh, Schools, Platform users, School profile, Users & roles, Audit log, My account, invitation and reset-password pages                         |

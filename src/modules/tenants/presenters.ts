@@ -1,4 +1,4 @@
-import type { tenantSettings, tenants } from '../../db/schema/index.js';
+import type { tenantProfiles, tenantSettings, tenants } from '../../db/schema/index.js';
 
 export function presentTenant(t: typeof tenants.$inferSelect) {
   return {
@@ -37,8 +37,33 @@ export function presentSettings(s: typeof tenantSettings.$inferSelect) {
     working_days: s.workingDays,
     academic_year_start_month: s.academicYearStartMonth,
     brand_primary_color: s.brandPrimaryColor,
+    brand_secondary_color: s.brandSecondaryColor,
+    brand_accent_color: s.brandAccentColor,
     logo_file_id: s.logoFileId,
+    banner_file_id: s.bannerFileId,
+    document_header_file_id: s.documentHeaderFileId,
     version: s.version,
     updated_at: s.updatedAt.toISOString(),
+  };
+}
+
+const emptyToNull = <T>(v: T | null | undefined) => v ?? null;
+
+export function presentProfileExtras(p: typeof tenantProfiles.$inferSelect | undefined) {
+  return {
+    affiliation_board: emptyToNull(p?.affiliationBoard),
+    affiliation_number: emptyToNull(p?.affiliationNumber),
+    school_code: emptyToNull(p?.schoolCode),
+    established_year: emptyToNull(p?.establishedYear),
+    medium_of_instruction: emptyToNull(p?.mediumOfInstruction),
+    motto: emptyToNull(p?.motto),
+    about: emptyToNull(p?.about),
+    secondary_phone: emptyToNull(p?.secondaryPhone),
+    landline: emptyToNull(p?.landline),
+    reception_phone: emptyToNull(p?.receptionPhone),
+    alternate_email: emptyToNull(p?.alternateEmail),
+    contact_person_name: emptyToNull(p?.contactPersonName),
+    contact_person_role: emptyToNull(p?.contactPersonRole),
+    document_footer: emptyToNull(p?.documentFooter),
   };
 }

@@ -71,6 +71,8 @@ export class EntitlementService {
           cancelledAt: subscriptions.cancelledAt,
           endedAt: subscriptions.endedAt,
           planCode: plans.code,
+          maxStaffUsers: planVersions.maxStaffUsers,
+          maxStudents: planVersions.maxStudents,
         })
         .from(subscriptions)
         .innerJoin(planVersions, eq(planVersions.id, subscriptions.planVersionId))
@@ -95,6 +97,10 @@ export class EntitlementService {
       rows,
       subscription: effectiveSubscription(current, now, this.deps.env.SUBSCRIPTION_GRACE_DAYS),
       planCode: current?.planCode ?? null,
+      limits: {
+        maxStaffUsers: current?.maxStaffUsers ?? null,
+        maxStudents: current?.maxStudents ?? null,
+      },
       now,
     });
   }

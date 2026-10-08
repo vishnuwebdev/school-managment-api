@@ -35,6 +35,7 @@ describe('RBAC — roles are data, permissions are the contract', () => {
     const upd = await S.admin.api.patch(`/roles/${role.body.data.id}`, {
       version: role.body.data.version,
       permissions: ['members.read', 'tenant.profile.read', 'tenant.settings.read'],
+      reason: 'Needs to see school settings',
     });
     expect(upd.status).toBe(200);
     expect(upd.body.data.permissions).toContain('tenant.settings.read');
@@ -144,12 +145,27 @@ describe('RBAC — roles are data, permissions are the contract', () => {
 
   it('carries scope with the assignment (e.g. teacher limited to sections)', async () => {
     const teacher = await h.roleId(S.admin.api, 'TEACHER');
+    // Without scope_ref it means "the sections this person teaches" (none for a non-teacher).
     const m = await h.addMember(S.admin.api, [
-      { role_id: teacher, scope_type: 'ASSIGNED_SECTION', scope_ref: { section_ids: ['sec-7a'] } },
+      { role_id: teacher, scope_type: 'ASSIGNED_SECTION' },
     ]);
     const res = await m.api.get('/_probe/attendance');
     expect(res.status).toBe(200);
-    expect(res.body.data).toEqual([{ type: 'ASSIGNED_SECTION', ref: { section_ids: ['sec-7a'] } }]);
+    expect(res.body.data).toEqual([{ type: 'ASSIGNED_SECTION', ref: { section_ids: [] } }]);
+    // Ids must exist in this school (D55).
+    const bogus = await S.admin.api.post('/members/invitations', {
+      email: `bogus-${Date.now()}@school.test`,
+      first_name: 'Bogus',
+      roles: [
+        {
+          role_id: teacher,
+          scope_type: 'ASSIGNED_SECTION',
+          scope_ref: { section_ids: ['00000000-0000-7000-8000-000000000000'] },
+        },
+      ],
+    });
+    expect(bogus.status).toBe(422);
+    expect(code(bogus)).toBe('VALIDATION_ERROR');
   });
 
   it('exposes a grouped permission catalog with entitlement and grantable flags', async () => {

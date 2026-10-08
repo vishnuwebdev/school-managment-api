@@ -1,4 +1,4 @@
-import { and, eq, ne, sql } from 'drizzle-orm';
+import { and, eq, inArray, ne, sql } from 'drizzle-orm';
 import type { Executor } from '../../db/client.js';
 import {
   memberships,
@@ -7,6 +7,7 @@ import {
   roleAssignments,
   roles,
   tenants,
+  users,
 } from '../../db/schema/index.js';
 import { BusinessRuleError } from '../../shared/errors.js';
 
@@ -35,7 +36,12 @@ export async function lockAdminScope(tx: Executor, tenantId: string | null): Pro
   }
 }
 
-/** ACTIVE memberships holding the admin permission through an ACTIVE role assignment. */
+/**
+ * ACTIVE memberships of ACTIVE user accounts holding the admin permission
+ * through an ACTIVE role assignment. In a school the assignment must be
+ * school-wide: `roles.assign` is TENANT_WIDE, so a section-limited grant does
+ * not make anyone an administrator (D55).
+ */
 export async function adminCount(
   tx: Executor,
   tenantId: string | null,
@@ -45,9 +51,14 @@ export async function adminCount(
   const [row] = await tx
     .select({ n: sql<number>`count(distinct ${memberships.id})` })
     .from(memberships)
+    .innerJoin(users, and(eq(users.id, memberships.userId), eq(users.status, 'ACTIVE')))
     .innerJoin(
       roleAssignments,
-      and(eq(roleAssignments.membershipId, memberships.id), eq(roleAssignments.status, 'ACTIVE')),
+      and(
+        eq(roleAssignments.membershipId, memberships.id),
+        eq(roleAssignments.status, 'ACTIVE'),
+        tenantId ? inArray(roleAssignments.scopeType, ['ALL_TENANT', 'ALL_TENANTS']) : undefined,
+      ),
     )
     .innerJoin(roles, and(eq(roles.id, roleAssignments.roleId), eq(roles.status, 'ACTIVE')))
     .innerJoin(rolePermissions, eq(rolePermissions.roleId, roles.id))

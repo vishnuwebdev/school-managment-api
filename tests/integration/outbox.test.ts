@@ -1,4 +1,4 @@
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { outboxEvents } from '../../src/db/schema/index.js';
 import { processEvent, relayOutbox } from '../../src/events/processor.js';
@@ -21,13 +21,20 @@ describe('outbox & event processing', () => {
       first_name: 'Dup',
       roles: [{ role_id: teacher }],
     });
+    // This school's own pending invitation event (not "the oldest 100 in the shared test database",
+    // which stops containing it once the suite has created enough invitations).
     const [event] = await h.deps.db
       .select()
       .from(outboxEvents)
-      .where(eq(outboxEvents.eventType, 'invitation.created'))
+      .where(
+        and(
+          eq(outboxEvents.tenantId, S.tenantId),
+          eq(outboxEvents.eventType, 'invitation.created'),
+          eq(outboxEvents.status, 'PENDING'),
+        ),
+      )
       .orderBy(outboxEvents.occurredAt)
-      .limit(100)
-      .then((rows) => rows.filter((r) => r.status === 'PENDING'));
+      .limit(1);
     expect(event).toBeTruthy();
 
     await processEvent(h.deps, event!.id);

@@ -8,3 +8,4 @@ process.env.MAIL_DRIVER = 'memory';
 process.env.LOG_LEVEL = 'silent';
 process.env.CACHE_TTL_SECONDS = '60';
 process.env.APP_BASE_URL = 'http://app.test';
+process.env.STORAGE_DIR = `${process.env.TMPDIR ?? '/tmp'}/sms-test-storage`;

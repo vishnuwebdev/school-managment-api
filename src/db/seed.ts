@@ -1,13 +1,15 @@
 import 'dotenv/config';
-import { and, eq, inArray, notInArray } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, notInArray } from 'drizzle-orm';
 import { pathToFileURL } from 'node:url';
 import { FEATURES } from '../catalog/features.js';
 import { PERMISSIONS } from '../catalog/permissions.js';
 import { PLANS } from '../catalog/plans.js';
 import { resolveSystemRolePermissions, SYSTEM_ROLES } from '../catalog/roles.js';
+import { syncPlanVersionEntitlements } from '../modules/entitlements/plan-sync.js';
 import { hashPassword } from '../modules/identity/password.js';
 import { createDatabase, type Database } from './client.js';
 import {
+  entitlements,
   featureDependencies,
   features,
   memberships,
@@ -29,6 +31,9 @@ import {
 export async function seedCatalog(db: Database) {
   await db.transaction(async (tx) => {
     // ---- Features & dependencies
+    const knownFeatureCodes = new Set(
+      (await tx.select({ code: features.code }).from(features)).map((r) => r.code),
+    );
     for (const [i, f] of FEATURES.entries()) {
       const def = f as (typeof FEATURES)[number] & {
         parent?: string;
@@ -130,34 +135,89 @@ export async function seedCatalog(db: Database) {
           .values(wanted.map((pid) => ({ roleId: role!.id, permissionId: pid })));
     }
 
-    // ---- Plans (version 1). Existing versions are never modified once referenced.
+    // ---- Plans. Created once (version 1); after that the super admin owns name,
+    // description, price, limits and features, so a deploy never overwrites them.
+    const newFeatureCodes = new Set(
+      FEATURES.map((f) => f.code as string).filter((c) => !knownFeatureCodes.has(c)),
+    );
+    const now = new Date();
     for (const plan of PLANS) {
-      await tx
-        .insert(plans)
-        .values({ code: plan.code, name: plan.name, description: plan.description })
-        .onDuplicateKeyUpdate({ set: { name: plan.name, description: plan.description } });
-      const [planRow] = await tx.select().from(plans).where(eq(plans.code, plan.code));
-      const [existing] = await tx
+      let [planRow] = await tx.select().from(plans).where(eq(plans.code, plan.code));
+      if (!planRow) {
+        await tx
+          .insert(plans)
+          .values({ code: plan.code, name: plan.name, description: plan.description });
+        [planRow] = await tx.select().from(plans).where(eq(plans.code, plan.code));
+      }
+      const versions = await tx
         .select()
         .from(planVersions)
-        .where(and(eq(planVersions.planId, planRow!.id), eq(planVersions.version, 1)));
-      if (existing) continue;
-      const [v] = await tx
-        .insert(planVersions)
-        .values({
-          planId: planRow!.id,
-          version: 1,
-          currency: plan.currency,
-          priceMonthlyMinor: plan.priceMonthlyMinor,
-          priceAnnualMinor: plan.priceAnnualMinor,
-          effectiveFrom: new Date('2026-01-01T00:00:00Z'),
-        })
-        .$returningId();
-      await tx
-        .insert(planFeatures)
-        .values(
-          plan.features.map((code) => ({ planVersionId: v!.id, featureId: featureId.get(code)! })),
+        .where(eq(planVersions.planId, planRow!.id));
+      if (versions.length === 0) {
+        const [v] = await tx
+          .insert(planVersions)
+          .values({
+            planId: planRow!.id,
+            version: 1,
+            currency: plan.currency,
+            priceMonthlyMinor: plan.priceMonthlyMinor,
+            priceAnnualMinor: plan.priceAnnualMinor,
+            effectiveFrom: new Date('2026-01-01T00:00:00Z'),
+          })
+          .$returningId();
+        await tx.insert(planFeatures).values(
+          plan.features.map((code) => ({
+            planVersionId: v!.id,
+            featureId: featureId.get(code)!,
+          })),
         );
+        continue;
+      }
+      // Features added to the catalog since this plan was created join it by default.
+      const added = plan.features.filter((c) => newFeatureCodes.has(c));
+      if (added.length === 0) continue;
+      for (const v of versions) {
+        const have = new Set(
+          (
+            await tx
+              .select({ id: planFeatures.featureId })
+              .from(planFeatures)
+              .where(eq(planFeatures.planVersionId, v.id))
+          ).map((r) => r.id),
+        );
+        const missing = added.map((c) => featureId.get(c)!).filter((id) => !have.has(id));
+        if (missing.length)
+          await tx
+            .insert(planFeatures)
+            .values(missing.map((id) => ({ planVersionId: v.id, featureId: id })));
+      }
+      await syncPlanVersionEntitlements(
+        tx,
+        versions.map((v) => v.id),
+        now,
+        null,
+      );
+    }
+
+    // Schools that already had custom roles keep the ability to manage them when
+    // Custom roles first becomes a separate feature.
+    if (newFeatureCodes.has('custom_roles') && featureId.get('custom_roles')) {
+      const withRoles = await tx
+        .selectDistinct({ tenantId: roles.tenantId })
+        .from(roles)
+        .where(
+          and(isNotNull(roles.tenantId), eq(roles.status, 'ACTIVE'), eq(roles.roleType, 'CUSTOM')),
+        );
+      for (const r of withRoles) {
+        await tx.insert(entitlements).values({
+          tenantId: r.tenantId!,
+          featureId: featureId.get('custom_roles')!,
+          sourceType: 'CUSTOM_CONTRACT',
+          effect: 'GRANT',
+          startsAt: now,
+          reason: 'Already had custom roles when Custom roles became a separate feature',
+        });
+      }
     }
   });
 }

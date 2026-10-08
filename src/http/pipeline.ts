@@ -8,6 +8,7 @@ import {
   scopeOfPermission,
   type AuthorizationService,
 } from '../modules/access/authorization.service.js';
+import { platformGrantsInSchool } from '../modules/access/scope-policy.js';
 import type { EntitlementService } from '../modules/entitlements/entitlements.service.js';
 import type { TokenService } from '../modules/identity/tokens.js';
 import type { Principal } from '../platform/context.js';
@@ -162,7 +163,12 @@ export function createPipeline(deps: Deps, svc: PipelineServices): Pipeline {
       const tenantPermissions = [...principal.permissions].filter(
         (c) => scopeOfPermission(c) === 'TENANT',
       );
-      req.ctx.principal = { ...principal, permissions: new Set(tenantPermissions) };
+      // Entry to this school was checked above, so those permissions cover the whole school.
+      req.ctx.principal = {
+        ...principal,
+        permissions: new Set(tenantPermissions),
+        scopes: platformGrantsInSchool(principal.scopes, tenantPermissions),
+      };
       req.ctx.tenant = await tenantContext(requestedTenant, true, req.ctx.principal, true);
       // A school that is not ACTIVE is read-only for platform support: recovery happens through
       // the platform school actions (reactivate, restore, subscription), never by editing inside it.

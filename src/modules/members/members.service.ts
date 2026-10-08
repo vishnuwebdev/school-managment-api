@@ -1,3 +1,4 @@
+import { assertWithinPlanLimit } from '../entitlements/plan-limits.js';
 import { and, count, desc, eq, inArray, isNull, like, or, sql, type SQL } from 'drizzle-orm';
 import type { Deps } from '../../container.js';
 import type { Executor } from '../../db/client.js';
@@ -19,6 +20,32 @@ import { adminCount, assertAdminSurvives, lockAdminScope } from '../access/admin
 import type { AuthorizationService } from '../access/authorization.service.js';
 import { assertCanGrant, assertScopeWithin, type RoleService } from '../access/roles.service.js';
 import { assignRoles, inviteMember, queueInvitation, type AssignmentInput } from './invitations.js';
+
+interface AssignmentFact {
+  role_id: string;
+  scope_type: string;
+  scope_ref: Record<string, string[]> | null;
+}
+
+/** Assignments present only after (added) or only before (removed); a scope change is both. */
+export function diffAssignments(before: AssignmentFact[], after: AssignmentFact[]) {
+  const key = (a: AssignmentFact) =>
+    JSON.stringify([
+      a.role_id,
+      a.scope_type,
+      a.scope_ref
+        ? Object.entries(a.scope_ref)
+            .map(([k, v]) => [k, [...v].sort()] as const)
+            .sort(([a1], [b1]) => a1.localeCompare(b1))
+        : null,
+    ]);
+  const b = new Set(before.map(key));
+  const a = new Set(after.map(key));
+  return {
+    added: after.filter((x) => !b.has(key(x))),
+    removed: before.filter((x) => !a.has(key(x))),
+  };
+}
 
 type LatestInvitation = {
   membershipId: string;
@@ -116,17 +143,7 @@ export class MemberService {
       this.assignmentsOf([membershipId], executor),
       this.latestInvitations([membershipId], executor),
     ]);
-    const invite = invites.get(membershipId);
-    return {
-      ...this.present(row.m, row.u, assignments, invites),
-      invitation: invite
-        ? {
-            status: invite.status,
-            sent_at: invite.sentAt?.toISOString() ?? null,
-            expires_at: invite.expiresAt.toISOString(),
-          }
-        : null,
-    };
+    return this.present(row.m, row.u, assignments, invites);
   }
 
   private async assignmentsOf(membershipIds: string[], executor: Executor = this.deps.db) {
@@ -185,6 +202,12 @@ export class MemberService {
     // must never reveal the name or activity of an existing account elsewhere.
     const pending = m.status === 'INVITED';
     const invite = invites.get(m.id);
+    // A pending member whose latest link can no longer be used needs "Resend".
+    const expired =
+      pending &&
+      (!invite ||
+        !['PENDING', 'SENT'].includes(invite.status) ||
+        invite.expiresAt <= this.deps.clock.now());
     return {
       id: m.id,
       status: m.status,
@@ -209,6 +232,14 @@ export class MemberService {
             status: u.status,
             last_login_at: u.lastLoginAt?.toISOString() ?? null,
           },
+      invitation: invite
+        ? {
+            status: invite.status,
+            sent_at: invite.sentAt?.toISOString() ?? null,
+            expires_at: invite.expiresAt.toISOString(),
+            expired,
+          }
+        : null,
       roles: assignments
         .filter((a) => a.membershipId === m.id)
         .map((a) => ({
@@ -347,6 +378,8 @@ export class MemberService {
         principal,
         member.roles.map((r) => r.role_id),
       );
+      if (status === 'ACTIVE' && tenantId)
+        await assertWithinPlanLimit(tx, tenantId, this.deps.clock.now(), 'STAFF_USERS');
       await tx.update(memberships).set({ status }).where(eq(memberships.id, membershipId));
       if (status === 'SUSPENDED') {
         await assertAdminSurvives(tx, tenantId, adminsBefore);
@@ -360,6 +393,15 @@ export class MemberService {
         before: { status: member.status },
         after: { status },
         reason,
+      });
+      // Facts for notifications ("your access was suspended / restored"). The reason
+      // stays in the audit log; payloads carry ids only.
+      await publishEvent(tx, actor, {
+        tenantId,
+        eventType: status === 'SUSPENDED' ? 'membership.suspended' : 'membership.reactivated',
+        aggregateType: 'membership',
+        aggregateId: membershipId,
+        payload: { membership_id: membershipId, user_id: member.user.id },
       });
       return this.get(tenantId, membershipId, tx);
     });
@@ -463,7 +505,7 @@ export class MemberService {
         .where(
           and(eq(roleAssignments.membershipId, membershipId), eq(roleAssignments.status, 'ACTIVE')),
         );
-      await assignRoles(tx, { membershipId, tenantId, assignments, actor });
+      const assigned = await assignRoles(tx, { membershipId, tenantId, assignments, actor });
       await assertAdminSurvives(tx, tenantId, adminsBefore);
 
       await recordAudit(tx, actor, {
@@ -476,15 +518,38 @@ export class MemberService {
             role_id: r.role_id,
             code: r.code,
             scope_type: r.scope_type,
+            scope_ref: r.scope_ref,
           })),
         },
         after: {
-          roles: assignments.map((a) => ({
+          roles: assigned.map((a) => ({
             role_id: a.roleId,
-            scope_type: a.scopeType ?? 'ALL_TENANT',
+            scope_type: a.scopeType,
+            scope_ref: a.scopeRef,
           })),
         },
       });
+      const { added, removed } = diffAssignments(
+        member.roles.map((r) => ({
+          role_id: r.role_id,
+          scope_type: r.scope_type,
+          scope_ref: r.scope_ref,
+        })),
+        assigned.map((a) => ({
+          role_id: a.roleId,
+          scope_type: a.scopeType,
+          scope_ref: a.scopeRef,
+        })),
+      );
+      if (added.length || removed.length) {
+        await publishEvent(tx, actor, {
+          tenantId,
+          eventType: 'membership.roles_changed',
+          aggregateType: 'membership',
+          aggregateId: membershipId,
+          payload: { membership_id: membershipId, user_id: member.user.id, added, removed },
+        });
+      }
       return this.get(tenantId, membershipId, tx);
     });
     await this.authz.invalidateTenant(tenantId);

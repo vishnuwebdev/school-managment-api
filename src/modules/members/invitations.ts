@@ -1,3 +1,4 @@
+import { assertWithinPlanLimit } from '../entitlements/plan-limits.js';
 import { and, eq, inArray } from 'drizzle-orm';
 import type { Deps } from '../../container.js';
 import type { Executor } from '../../db/client.js';
@@ -15,6 +16,7 @@ import type { Actor } from '../../platform/context.js';
 import { publishEvent } from '../../platform/outbox.js';
 import { BusinessRuleError, ConflictError, NotFoundError } from '../../shared/errors.js';
 import { addHours } from '../../shared/time.js';
+import { normalizeAssignments } from '../access/scope-validation.js';
 
 export interface AssignmentInput {
   roleId: string;
@@ -79,6 +81,8 @@ export async function inviteMember(deps: Deps, tx: Executor, input: InviteInput,
       );
     }
     // Re-inviting a REVOKED member reuses the membership (history is in the audit log).
+    if (input.tenantId)
+      await assertWithinPlanLimit(tx, input.tenantId, deps.clock.now(), 'STAFF_USERS');
     membershipId = prior.id;
     await tx
       .update(memberships)
@@ -89,6 +93,8 @@ export async function inviteMember(deps: Deps, tx: Executor, input: InviteInput,
       .set({ status: 'REVOKED' })
       .where(and(eq(roleAssignments.membershipId, prior.id), eq(roleAssignments.status, 'ACTIVE')));
   } else {
+    if (input.tenantId)
+      await assertWithinPlanLimit(tx, input.tenantId, deps.clock.now(), 'STAFF_USERS');
     const [row] = await tx
       .insert(memberships)
       .values({
@@ -103,7 +109,7 @@ export async function inviteMember(deps: Deps, tx: Executor, input: InviteInput,
     membershipId = row!.id;
   }
 
-  await assignRoles(tx, {
+  const assigned = await assignRoles(tx, {
     membershipId,
     tenantId: input.tenantId,
     assignments: input.assignments,
@@ -127,7 +133,15 @@ export async function inviteMember(deps: Deps, tx: Executor, input: InviteInput,
     action: 'MEMBER_INVITED',
     entityType: 'membership',
     entityId: membershipId,
-    after: { email, role_ids: input.assignments.map((a) => a.roleId) },
+    after: {
+      email,
+      role_ids: assigned.map((a) => a.roleId),
+      roles: assigned.map((a) => ({
+        role_id: a.roleId,
+        scope_type: a.scopeType,
+        scope_ref: a.scopeRef,
+      })),
+    },
   });
   return { userId, membershipId, invitationId };
 }
@@ -190,7 +204,7 @@ export async function assignRoles(
     actor: Actor;
   },
 ) {
-  if (input.assignments.length === 0) return;
+  if (input.assignments.length === 0) return [];
   const ids = [...new Set(input.assignments.map((a) => a.roleId))];
   const found = await tx.select().from(roles).where(inArray(roles.id, ids));
   const expectedScope = input.tenantId ? 'TENANT' : 'PLATFORM';
@@ -203,15 +217,17 @@ export async function assignRoles(
       (role.tenantId === null || role.tenantId === input.tenantId);
     if (!visible) throw new NotFoundError('Role', { role_id: id });
   }
+  // Scope type, scope_ref ids and scope support are validated centrally (D55).
+  const normalized = await normalizeAssignments(tx, input.tenantId, input.assignments);
   await tx.insert(roleAssignments).values(
-    input.assignments.map((a) => ({
+    normalized.map((a) => ({
       tenantId: input.tenantId,
       membershipId: input.membershipId,
       roleId: a.roleId,
-      scopeType:
-        a.scopeType ?? (input.tenantId ? ('ALL_TENANT' as const) : ('ALL_TENANTS' as const)),
-      scopeRef: a.scopeRef ?? null,
+      scopeType: a.scopeType,
+      scopeRef: a.scopeRef,
       createdBy: input.actor.userId,
     })),
   );
+  return normalized;
 }

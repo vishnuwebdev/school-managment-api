@@ -21,7 +21,8 @@ export const cacheKeys = {
   tenantAuthzNamespace: (tenantId: string | null) =>
     tenantId ? `tenant:${tenantId}:authz` : 'platform:authz',
   membershipPrincipal: (membershipId: string, authzVersion: string, systemVersion: string) =>
-    `membership:${membershipId}:principal:${authzVersion}:${systemVersion}`,
+    // `s2`: grants shape after the central scope policy (D55); bump when the policy changes.
+    `membership:${membershipId}:principal:s2:${authzVersion}:${systemVersion}`,
   systemRolesNamespace: 'system:roles',
 };
 

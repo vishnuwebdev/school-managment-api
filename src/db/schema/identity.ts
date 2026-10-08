@@ -60,6 +60,8 @@ export const memberships = mysqlTable(
   },
   (t) => [
     uniqueIndex('memberships_user_tenant_uq').on(t.userId, t.tenantKey),
+    /** Lets other tables reference a membership through a composite (tenant_id, id) foreign key. */
+    uniqueIndex('memberships_tenant_id_uq').on(t.tenantId, t.id),
     index('memberships_tenant_status_idx').on(t.tenantId, t.status),
   ],
 );

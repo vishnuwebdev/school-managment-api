@@ -1,8 +1,16 @@
 import { asc, eq } from 'drizzle-orm';
+import { scopeSupportOf } from '../access/scope-policy.js';
 import type { Deps } from '../../container.js';
-import { features, permissions, planFeatures, plans, planVersions } from '../../db/schema/index.js';
+import { features, permissions } from '../../db/schema/index.js';
+import { FEATURES } from '../../catalog/features.js';
 import { defineRoute } from '../../http/route.js';
 import type { EntitlementService } from '../entitlements/entitlements.service.js';
+
+const capabilityCodes = new Set<string>(
+  (FEATURES as readonly { code: string; kind?: string }[])
+    .filter((f) => f.kind === 'capability')
+    .map((f) => f.code),
+);
 
 export function catalogRoutes(deps: Deps, entitlements: EntitlementService) {
   const featureList = async () => {
@@ -16,6 +24,7 @@ export function catalogRoutes(deps: Deps, entitlements: EntitlementService) {
       description: f.description,
       parent_code: f.parentCode,
       is_core: f.isCore,
+      kind: capabilityCodes.has(f.code) ? 'capability' : 'feature',
       status: f.status,
       depends_on: graph.find((g) => g.code === f.code)?.dependsOn ?? [],
     }));
@@ -52,6 +61,8 @@ export function catalogRoutes(deps: Deps, entitlements: EntitlementService) {
                   name: p.name,
                   sensitive: p.isSensitive,
                   grantable: req.ctx.principal!.permissions.has(p.code),
+                  // How a role limited to part of the school applies this permission (D55).
+                  scope_support: scopeSupportOf(p.code),
                 })),
             }))
             .filter((g) => g.permissions.length > 0),
@@ -66,42 +77,6 @@ export function catalogRoutes(deps: Deps, entitlements: EntitlementService) {
       access: 'platform',
       permissions: ['platform.catalog.read'],
       handler: async () => ({ data: await featureList() }),
-    }),
-    defineRoute({
-      method: 'get',
-      path: '/platform/plans',
-      summary: 'Plans with their current version, price and features',
-      tags: ['Platform · Catalog'],
-      access: 'platform',
-      permissions: ['platform.catalog.read'],
-      handler: async () => {
-        const rows = await deps.db
-          .select({ plan: plans, version: planVersions })
-          .from(plans)
-          .innerJoin(planVersions, eq(planVersions.planId, plans.id))
-          .where(eq(planVersions.status, 'ACTIVE'))
-          .orderBy(asc(planVersions.priceMonthlyMinor));
-        const pf = await deps.db
-          .select({ versionId: planFeatures.planVersionId, code: features.code })
-          .from(planFeatures)
-          .innerJoin(features, eq(features.id, planFeatures.featureId));
-        return {
-          data: rows.map(({ plan, version }) => ({
-            code: plan.code,
-            name: plan.name,
-            description: plan.description,
-            status: plan.status,
-            version: version.version,
-            currency: version.currency,
-            price_monthly_minor: version.priceMonthlyMinor,
-            price_annual_minor: version.priceAnnualMinor,
-            features: pf
-              .filter((x) => x.versionId === version.id)
-              .map((x) => x.code)
-              .sort(),
-          })),
-        };
-      },
     }),
     defineRoute({
       method: 'get',

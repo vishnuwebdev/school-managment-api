@@ -1,10 +1,22 @@
-import { and, eq, gt, isNull, lte, or } from 'drizzle-orm';
+import { and, eq, gt, inArray, isNull, lte, or } from 'drizzle-orm';
 import type { Deps } from '../../container.js';
-import { permissions, rolePermissions, roleAssignments, roles } from '../../db/schema/index.js';
+import {
+  academicSections,
+  academicYears,
+  permissions,
+  rolePermissions,
+  roleAssignments,
+  roles,
+  sectionClassTeachers,
+  subjectOfferings,
+  teachers,
+  teachingAssignments,
+} from '../../db/schema/index.js';
 import { cacheKeys } from '../../infrastructure/cache.js';
 import type { Principal, ScopeGrant, TenantContext } from '../../platform/context.js';
 import { PERMISSIONS } from '../../catalog/permissions.js';
 import { AuthorizationError } from '../../shared/errors.js';
+import { applyScopePolicy } from './scope-policy.js';
 
 export interface Grants {
   permissions: string[];
@@ -34,11 +46,16 @@ export class AuthorizationService {
     return this.deps.cache.remember(
       cacheKeys.membershipPrincipal(membershipId, authzVersion, systemVersion),
       this.deps.env.CACHE_TTL_SECONDS,
-      () => this.loadGrants(membershipId),
+      () => this.loadGrants(membershipId, tenantId !== null),
     );
   }
 
-  async loadGrants(membershipId: string): Promise<Grants> {
+  /**
+   * Raw grants of the membership's ACTIVE role assignments. For a school
+   * membership (`schoolContext`) the central scope policy is applied (D55): a
+   * permission that does not support the assignment's scope is not held.
+   */
+  async loadGrants(membershipId: string, schoolContext = true): Promise<Grants> {
     const now = this.deps.clock.now();
     const rows = await this.deps.db
       .select({
@@ -72,7 +89,103 @@ export class AuthorizationService {
         list.push({ type: r.scopeType, ref: r.scopeRef ?? null });
       }
     }
-    return { permissions: Object.keys(scopes).sort(), scopes };
+    await this.deriveAssignedScopes(membershipId, scopes);
+    const effective = schoolContext ? applyScopePolicy(scopes) : scopes;
+    return { permissions: Object.keys(effective).sort(), scopes: effective };
+  }
+
+  /**
+   * An ASSIGNED_SECTION / ASSIGNED_CLASS grant with no explicit ids means "the
+   * sections I am assigned to": the class teacher of a section, or a teacher
+   * with an open teaching assignment on it. Resolved here, once per grant load
+   * (cached, and dropped whenever assignments change), so every domain module's
+   * existing scope check works without knowing about teachers.
+   */
+  private async deriveAssignedScopes(membershipId: string, scopes: Record<string, ScopeGrant[]>) {
+    const wantsDerived = Object.values(scopes).some((list) =>
+      list.some(
+        (g) => (g.type === 'ASSIGNED_SECTION' || g.type === 'ASSIGNED_CLASS') && g.ref === null,
+      ),
+    );
+    if (!wantsDerived) return;
+    const sectionIds = new Set<string>();
+    const classIds = new Set<string>();
+    const [teacher] = await this.deps.db
+      .select({ id: teachers.id, tenantId: teachers.tenantId })
+      .from(teachers)
+      .where(
+        and(
+          eq(teachers.membershipId, membershipId),
+          inArray(teachers.status, ['ACTIVE', 'ON_LEAVE']),
+        ),
+      );
+    if (teacher) {
+      const today = this.deps.clock.now().toISOString().slice(0, 10);
+      const db = this.deps.db;
+      const liveYear = inArray(academicYears.status, ['ACTIVE', 'UPCOMING']);
+      const own = await db
+        .select({ id: academicSections.id, classId: academicSections.classId })
+        .from(sectionClassTeachers)
+        .innerJoin(academicSections, eq(academicSections.id, sectionClassTeachers.sectionId))
+        .innerJoin(academicYears, eq(academicYears.id, academicSections.academicYearId))
+        .where(
+          and(
+            eq(sectionClassTeachers.tenantId, teacher.tenantId),
+            eq(sectionClassTeachers.teacherId, teacher.id),
+            eq(sectionClassTeachers.status, 'ACTIVE'),
+            lte(sectionClassTeachers.startDate, today),
+            liveYear,
+          ),
+        );
+      for (const r of own) {
+        sectionIds.add(r.id);
+        classIds.add(r.classId);
+      }
+      const offerings = await db
+        .select({
+          sectionId: subjectOfferings.sectionId,
+          classId: subjectOfferings.classId,
+          yearId: subjectOfferings.academicYearId,
+        })
+        .from(teachingAssignments)
+        .innerJoin(subjectOfferings, eq(subjectOfferings.id, teachingAssignments.subjectOfferingId))
+        .innerJoin(academicYears, eq(academicYears.id, subjectOfferings.academicYearId))
+        .where(
+          and(
+            eq(teachingAssignments.tenantId, teacher.tenantId),
+            eq(teachingAssignments.teacherId, teacher.id),
+            eq(teachingAssignments.status, 'ACTIVE'),
+            lte(teachingAssignments.startDate, today),
+            liveYear,
+          ),
+        );
+      for (const o of offerings) {
+        classIds.add(o.classId);
+        if (o.sectionId) {
+          sectionIds.add(o.sectionId);
+          continue;
+        }
+        // A class-wide offering covers every section of that class in the year.
+        const secs = await db
+          .select({ id: academicSections.id })
+          .from(academicSections)
+          .where(
+            and(
+              eq(academicSections.tenantId, teacher.tenantId),
+              eq(academicSections.classId, o.classId),
+              eq(academicSections.academicYearId, o.yearId),
+            ),
+          );
+        for (const sec of secs) sectionIds.add(sec.id);
+      }
+    }
+    for (const list of Object.values(scopes)) {
+      for (const g of list) {
+        if (g.ref !== null) continue;
+        if (g.type === 'ASSIGNED_SECTION') g.ref = { section_ids: [...sectionIds] };
+        else if (g.type === 'ASSIGNED_CLASS') g.ref = { class_ids: [...classIds] };
+      }
+    }
   }
 
   /** Invalidate cached grants for every membership of a tenant (or platform). */

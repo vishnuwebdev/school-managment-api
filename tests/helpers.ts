@@ -137,7 +137,9 @@ export async function createHarness() {
   }
 
   /** Milestone-1 flow: platform creates + provisions a school; the invited admin signs in. */
-  async function provisionSchool(opts: { plan?: string; trialDays?: number } = {}) {
+  async function provisionSchool(
+    opts: { plan?: string; trialDays?: number; customRoles?: boolean } = {},
+  ) {
     const root = await superAdmin();
     const schoolCode = uniq('school');
     const created = await root.post('/platform/tenants', {
@@ -153,6 +155,15 @@ export async function createHarness() {
       admin: { email: adminEmail, first_name: 'Admin' },
     });
     expect(prov.status, JSON.stringify(prov.body)).toBe(200);
+    // Custom roles is a separate (sellable) feature; most tests need it, so give it
+    // to the test school unless the test is about the plan not including it.
+    if (opts.customRoles !== false) {
+      const grant = await root.put(
+        `/platform/tenants/${tenantId}/entitlements/overrides/custom_roles`,
+        { effect: 'GRANT', reason: 'Test school uses custom roles' },
+      );
+      expect(grant.status, JSON.stringify(grant.body)).toBe(200);
+    }
     const admin = await acceptAndLogin(adminEmail);
     return { tenantId, code: schoolCode, adminEmail, admin, root };
   }
@@ -177,6 +188,33 @@ export async function createHarness() {
     return role!.id;
   }
 
+  /**
+   * A custom copy of a system role holding only the permissions that can be
+   * limited to part of the school (scope_support other than TENANT_WIDE, D55),
+   * so it can be assigned with ASSIGNED_SECTION / ASSIGNED_CLASS.
+   */
+  async function scopableRole(api: Api, baseRoleCode: string) {
+    const [rolesRes, catalog] = await Promise.all([api.get('/roles'), api.get('/permissions')]);
+    expect(rolesRes.status, JSON.stringify(rolesRes.body)).toBe(200);
+    expect(catalog.status, JSON.stringify(catalog.body)).toBe(200);
+    const base = (rolesRes.body.data as { code: string; permissions: string[] }[]).find(
+      (r) => r.code === baseRoleCode,
+    );
+    expect(base, `role ${baseRoleCode}`).toBeTruthy();
+    const wideOnly = new Set(
+      (catalog.body.data as { permissions: { code: string; scope_support: string }[] }[])
+        .flatMap((g) => g.permissions)
+        .filter((p) => p.scope_support === 'TENANT_WIDE')
+        .map((p) => p.code),
+    );
+    const res = await api.post('/roles', {
+      name: `${baseRoleCode} (limited) ${uniq('r')}`,
+      permissions: base!.permissions.filter((c) => !wideOnly.has(c)),
+    });
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    return res.body.data.id as string;
+  }
+
   /** Drop cached entitlement snapshots (after moving the test clock). */
   async function flushTenantCache(tenantId: string) {
     await svc.entitlements.invalidate(tenantId);
@@ -198,6 +236,7 @@ export async function createHarness() {
     provisionSchool,
     addMember,
     roleId,
+    scopableRole,
     flushTenantCache,
     close: () => closeDeps(deps),
   };
