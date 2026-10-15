@@ -17,6 +17,7 @@
     "db:migrate": "tsx src/db/migrate.ts",
     "db:seed": "tsx src/db/seed.ts",
     "db:seed:demo": "tsx src/scripts/seed-demo.ts",
+    "teacher:access": "npm run db:seed && tsx src/scripts/teacher-access.ts",
     "scopes:report": "tsx src/scripts/scope-report.ts",
     "openapi": "tsx src/scripts/export-openapi.ts docs/api/openapi.json",
     "db:studio": "drizzle-kit studio",
