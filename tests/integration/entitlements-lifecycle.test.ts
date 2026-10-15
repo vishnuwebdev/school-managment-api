@@ -146,7 +146,7 @@ describe('school lifecycle is separate from subscription lifecycle', () => {
     h.clock.advanceDays(31); // grace exhausted → locked
     await h.flushTenantCache(S.tenantId);
     // (The 30-day refresh sessions have also expired by now, so sign in again.)
-    expect(code(await S.admin.api.get('/tenants/current'))).toBe('INVALID_TOKEN');
+    expect(code(await S.admin.api.get('/tenants/current'))).toBe('SESSION_EXPIRED');
     const admin = h.as((await h.login(S.adminEmail, S.admin.password)).access_token);
     expect(code(await admin.get('/tenants/current/subscription'))).toBe('SUBSCRIPTION_EXPIRED');
 

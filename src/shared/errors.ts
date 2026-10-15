@@ -5,8 +5,12 @@
 export type ErrorCode =
   | 'AUTHENTICATION_REQUIRED'
   | 'INVALID_TOKEN'
+  | 'SESSION_EXPIRED'
+  | 'SIGNED_OUT_ELSEWHERE'
+  | 'SESSION_REVOKED'
   | 'INVALID_CREDENTIALS'
   | 'ACCOUNT_LOCKED'
+  | 'NOT_A_TEACHER'
   | 'ACCOUNT_DISABLED'
   | 'CONTEXT_SELECTION_REQUIRED'
   | 'PERMISSION_DENIED'
@@ -50,6 +54,9 @@ export class AuthenticationError extends AppError {
     code:
       | 'AUTHENTICATION_REQUIRED'
       | 'INVALID_TOKEN'
+      | 'SESSION_EXPIRED'
+      | 'SIGNED_OUT_ELSEWHERE'
+      | 'SESSION_REVOKED'
       | 'INVALID_CREDENTIALS' = 'AUTHENTICATION_REQUIRED',
     message = 'Authentication is required',
   ) {
@@ -69,6 +76,7 @@ export class AuthorizationError extends AppError {
       | 'SUBSCRIPTION_EXPIRED'
       | 'ACCOUNT_DISABLED'
       | 'ACCOUNT_LOCKED'
+      | 'NOT_A_TEACHER'
     > = 'PERMISSION_DENIED',
     message = 'You do not have permission to perform this operation',
     details: unknown = null,

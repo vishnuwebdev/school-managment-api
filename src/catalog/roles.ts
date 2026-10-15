@@ -219,6 +219,7 @@ export const SYSTEM_ROLES: SystemRoleDef[] = [
       'leave.read',
       'leave.request',
       'communication.read',
+      'teacher_app.use',
     ],
   },
   {

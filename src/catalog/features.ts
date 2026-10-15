@@ -74,6 +74,15 @@ export const FEATURES = [
     dependsOn: ['teachers'],
   },
   {
+    // Paid add-on: not a capability, so no plan includes it automatically.
+    // Switched on per school (platform override today; an ADD_ON subscription item later).
+    code: 'teachers.mobile_app',
+    name: 'Teacher mobile app',
+    description: 'Teachers use the EduSphere Teacher app (iOS and Android).',
+    parent: 'teachers',
+    dependsOn: ['teachers'],
+  },
+  {
     code: 'teachers.staff_attendance',
     name: 'Staff attendance',
     description: 'Mark and view teacher and staff attendance.',

@@ -154,8 +154,8 @@ describe('sessions', () => {
     const idle = await h.http
       .post('/api/v1/auth/refresh')
       .send({ refresh_token: r1.body.data.refresh_token });
-    expect(code(idle)).toBe('INVALID_TOKEN');
-    expect(idle.body.error.message).toMatch(/inactivity/);
+    expect(code(idle)).toBe('SESSION_EXPIRED');
+    expect(idle.body.error.message).toMatch(/expired/);
   });
 });
 

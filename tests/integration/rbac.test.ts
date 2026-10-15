@@ -134,7 +134,7 @@ describe('RBAC — roles are data, permissions are the contract', () => {
       (await S.admin.api.delete(`/members/${m.membershipId}`, { reason: 'Left the school' }))
         .status,
     ).toBe(204);
-    expect(code(await m.api.get('/_probe/students'))).toBe('INVALID_TOKEN');
+    expect(code(await m.api.get('/_probe/students'))).toBe('SESSION_REVOKED');
     const detail = await S.admin.api.get(`/members/${m.membershipId}`);
     expect(detail.body.data.status).toBe('REVOKED');
     const audit = await S.admin.api.get(`/audit-logs?entity_id=${m.membershipId}`);

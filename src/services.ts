@@ -52,6 +52,7 @@ import { PlanService } from './modules/plans/plans.service.js';
 import { MemberService } from './modules/members/members.service.js';
 import { SchoolSetupService } from './modules/tenants/school-setup.service.js';
 import { TenantService } from './modules/tenants/tenants.service.js';
+import { TeacherAppService } from './modules/teacher-app/teacher-app.service.js';
 
 export function buildServices(deps: Deps) {
   const tokens = new TokenService(deps.env);
@@ -125,6 +126,7 @@ export function buildServices(deps: Deps) {
   const feeReconciliation = new ReconciliationService(deps, feePayments);
   const feeArrears = new ArrearsService(deps);
   const feeReports = new FeeReportService(deps);
+  const teacherApp = new TeacherAppService(deps, classTeachers, attendanceReports, timetableViews);
   return {
     tokens,
     authz,
@@ -179,6 +181,7 @@ export function buildServices(deps: Deps) {
     feeReconciliation,
     feeArrears,
     feeReports,
+    teacherApp,
   };
 }
 

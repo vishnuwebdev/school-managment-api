@@ -45,6 +45,7 @@ import { studentImportRoutes } from './modules/students/import.routes.js';
 import { studentExitRoutes } from './modules/students/exits.routes.js';
 import { schoolSetupRoutes } from './modules/tenants/school-setup.routes.js';
 import { ALLOWED_IMAGE_TYPES } from './modules/tenants/school-setup.service.js';
+import { teacherAppRoutes } from './modules/teacher-app/teacher-app.routes.js';
 import type { Services } from './services.js';
 
 export interface AppOptions {
@@ -151,6 +152,25 @@ export function createApp(deps: Deps, svc: Services, opts: AppOptions = {}): Exp
         svc.timetableViews,
       ),
       ...examRoutes(svc.exams),
+      ...teacherAppRoutes({
+        app: svc.teacherApp,
+        teachers: svc.teachers,
+        qualifications: svc.qualifications,
+        assignments: svc.assignments,
+        attendanceConfig: svc.attendanceConfig,
+        attendanceSessions: svc.attendanceSessions,
+        attendanceReports: svc.attendanceReports,
+        timetableViews: svc.timetableViews,
+        calendar: svc.calendar,
+        students: svc.students,
+        guardians: svc.guardians,
+        enrollments: svc.enrollments,
+        exams: svc.exams,
+        leave: svc.leave,
+        staffAttendance: svc.staffAttendance,
+        db: deps.db,
+        clock: deps.clock,
+      }),
       ...feeRoutes({
         config: svc.feeConfig,
         assignments: svc.feeAssignments,

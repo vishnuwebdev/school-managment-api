@@ -253,6 +253,16 @@ async function main() {
       billing_interval: 'ANNUAL',
       admin: { email: s.admin[0], first_name: s.admin[1], last_name: s.admin[2] },
     });
+    // The teacher app is a paid add-on: switch it on for the demo schools that
+    // have timetable and leave (Standard and Premium).
+    if (s.plan !== 'STARTER') {
+      await ok(
+        'put',
+        `/platform/tenants/${tenantId}/entitlements/overrides/teachers.mobile_app`,
+        root,
+        { effect: 'GRANT', reason: 'Demo: teacher app add-on' },
+      );
+    }
     const accepted = await accept(s.admin[0]);
     if (!accepted) {
       warnings.push(`${s.code}: admin invitation link is in the worker log (${s.admin[0]})`);
@@ -1235,7 +1245,6 @@ async function seedTimetable() {
   }
 }
 
-
 /**
  * Examinations for the two demo schools, in three different states so every screen has
  * something to show: a PUBLISHED Unit Test (all marks in), a Mid-Term still being marked
@@ -1283,13 +1292,22 @@ async function seedExams() {
       skipped.push(`exams for ${t.name}`);
       continue;
     }
-    const classes = (await ok('get', '/academic-classes?page_size=100&status=ACTIVE', token)) as unknown as Json[];
+    const classes = (await ok(
+      'get',
+      '/academic-classes?page_size=100&status=ACTIVE',
+      token,
+    )) as unknown as Json[];
     const classIds = classes.map((c) => c.id as string);
     if (classIds.length === 0) {
       warnings.push(`${t.name}: exam demo data skipped (no classes)`);
       continue;
     }
-    const mk = async (name: string, type: string, startOffset: number, marking: 'all' | 'most' | 'none') => {
+    const mk = async (
+      name: string,
+      type: string,
+      startOffset: number,
+      marking: 'all' | 'most' | 'none',
+    ) => {
       const start = nthDay(iso(Date.now() + startOffset * DAY), 0);
       const exam = await ok('post', '/exams', token, {
         name,
@@ -1325,7 +1343,7 @@ async function seedExams() {
           if (roll < 3) return { student_id: r.student_id, absent: true };
           const pct = Math.max(8, Math.min(100, ability + ((roll % 21) - 10)));
           const max = p.max_marks as number;
-          return { student_id: r.student_id, marks: Math.round(((pct / 100) * max) * 2) / 2 };
+          return { student_id: r.student_id, marks: Math.round((pct / 100) * max * 2) / 2 };
         });
         await ok('put', `/exams/papers/${p.id}/marks`, token, { records });
       }
@@ -1335,7 +1353,9 @@ async function seedExams() {
     await ok('post', `/exams/${unit.id}/publish`, token, { allow_incomplete: true });
     await mk('Mid-Term Exam', 'MID_TERM', -4, 'most');
     await mk('Final Exam', 'FINAL', 60, 'none');
-    created.push(`3 exams for ${t.name}: Unit Test 1 published, Mid-Term being marked, Final Exam set up`);
+    created.push(
+      `3 exams for ${t.name}: Unit Test 1 published, Mid-Term being marked, Final Exam set up`,
+    );
   }
 }
 

@@ -87,6 +87,8 @@ const SCOPE_SUPPORT: Readonly<Record<string, Exclude<ScopeSupport, 'TENANT_WIDE'
 
   // Own records: a teacher's own personnel record, own leave, a guardian's own children.
   'teachers.read': 'OWN',
+  // Gate for /teacher/* routes; the records they return follow the wrapped permission's scope.
+  'teacher_app.use': 'NEUTRAL',
   'leave.read': 'OWN',
   'leave.request': 'OWN',
   'portal.access': 'OWN',
@@ -198,6 +200,7 @@ export const PERMISSIONS: readonly PermissionDef[] = [
   t('teachers.attendance.read', 'View staff attendance', 'teachers.staff_attendance'),
   t('teachers.attendance.mark', 'Mark staff attendance', 'teachers.staff_attendance'),
   t('teachers.portal.manage', 'Invite / remove teacher portal access', 'teachers.portal', true),
+  t('teacher_app.use', 'Use the teacher mobile app', 'teachers.mobile_app'),
 
   // ---- Attendance ----------------------------------------------------------
   t('attendance.read', 'View attendance', 'attendance'),

@@ -26,6 +26,7 @@ import {
 import { addDays, addMinutes } from '../../shared/time.js';
 import type { AuthorizationService } from '../access/authorization.service.js';
 import { dummyVerify, hashPassword, verifyPassword } from './password.js';
+import { sessionEnded } from './session-end.js';
 import type { TokenService } from './tokens.js';
 
 export interface DeviceInfo {
@@ -251,17 +252,16 @@ export class AuthService {
           },
         );
       }
-      throw new AuthenticationError('INVALID_TOKEN', 'The refresh token is invalid');
+      throw sessionEnded(session.revokedReason, session.expiresAt <= now);
     }
-    if (session.expiresAt <= now)
-      throw new AuthenticationError('INVALID_TOKEN', 'The refresh token has expired');
+    if (session.expiresAt <= now) throw sessionEnded(null, true);
     // Idle timeout: each rotation creates a new session row, so created_at is the last refresh.
     if (addDays(session.createdAt, this.deps.env.REFRESH_IDLE_DAYS) <= now) {
       await this.deps.db
         .update(userSessions)
         .set({ revokedAt: now, revokedReason: 'IDLE_TIMEOUT' })
         .where(and(eq(userSessions.id, session.id), isNull(userSessions.revokedAt)));
-      throw new AuthenticationError('INVALID_TOKEN', 'The session expired after inactivity');
+      throw sessionEnded('IDLE_TIMEOUT', true);
     }
 
     const [ctx] = await this.deps.db
@@ -274,7 +274,7 @@ export class AuthService {
         .update(userSessions)
         .set({ revokedAt: now, revokedReason: 'ACCESS_REVOKED' })
         .where(eq(userSessions.id, session.id));
-      throw new AuthenticationError('INVALID_TOKEN', 'The session is no longer valid');
+      throw sessionEnded('ACCESS_REVOKED', false);
     }
 
     return this.deps.db.transaction(async (tx) => {
