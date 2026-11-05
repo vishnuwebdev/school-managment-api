@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { PaymentBody } from '../billing/billing.schemas.js';
 import { BILLING_INTERVAL } from '../../db/schema/index.js';
+import { PasswordSchema } from '../identity/password.js';
 
 const nullableText = (max: number) => z.string().trim().max(max).nullable().optional();
 
@@ -104,6 +105,11 @@ export const ProvisionBody = z.object({
     email: z.email().max(254),
     first_name: z.string().trim().min(1).max(100),
     last_name: z.string().trim().max(100).optional(),
+    /**
+     * Optional. When given, the admin's login works at once with this password and no
+     * invitation email is sent; the platform team hands the details over.
+     */
+    password: PasswordSchema.optional(),
   }),
   settings: SettingsBody.omit({ version: true }).optional(),
   /** Price reduction agreed with the school, in minor units (paid subscriptions only). */
@@ -111,6 +117,9 @@ export const ProvisionBody = z.object({
   /** A payment already received offline for this subscription (paid subscriptions only). */
   payment: PaymentBody.optional(),
 });
+
+/** The platform team sets (or resets) a school admin's password. */
+export const AdminPasswordBody = z.object({ password: PasswordSchema });
 
 export const ChangeSubscriptionBody = z.object({
   plan_code: z.string().min(1).max(64),

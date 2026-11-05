@@ -1,5 +1,5 @@
 import { presentSnapshot } from '../entitlements/entitlement-resolver.js';
-import { and, count, desc, eq, inArray, like, or, type SQL } from 'drizzle-orm';
+import { and, count, desc, eq, inArray, like, ne, or, type SQL } from 'drizzle-orm';
 import type { z } from 'zod';
 import type { Deps } from '../../container.js';
 import type { Executor } from '../../db/client.js';
@@ -7,6 +7,7 @@ import {
   memberships,
   plans,
   planVersions,
+  roleAssignments,
   roles,
   schoolRequests,
   subscriptionItems,
@@ -15,6 +16,7 @@ import {
   tenantSettings,
   tenantStatusHistory,
   tenants,
+  users,
   type BillingInterval,
   type TenantStatus,
 } from '../../db/schema/index.js';
@@ -35,6 +37,8 @@ import type { PaymentInput } from '../billing/billing.schemas.js';
 import type { BillingService } from '../billing/billing.service.js';
 import type { EntitlementService } from '../entitlements/entitlements.service.js';
 import { inviteMember } from '../members/invitations.js';
+import { setPasswordByAdmin } from '../members/credentials.js';
+import { hashPassword } from '../identity/password.js';
 import { assertTransition } from './lifecycle.js';
 import { presentProfileExtras, presentSettings, presentTenant } from './presenters.js';
 import type {
@@ -428,6 +432,8 @@ export class TenantService {
    *   settings → subscription → plan entitlements → first admin invitation → ACTIVE
    */
   async provision(tenantId: string, input: z.infer<typeof ProvisionBody>, actor: Actor) {
+    // Hashing is slow, so do it before the transaction opens.
+    const adminPasswordHash = input.admin.password ? await hashPassword(input.admin.password) : null;
     const result = await this.deps.db.transaction(async (tx) => {
       const [tenant] = await tx
         .select()
@@ -488,6 +494,20 @@ export class TenantService {
         },
         { ...actor, tenantId },
       );
+      // Until email delivery exists, the platform team can give the admin a working login
+      // directly. This also revokes the queued invitation, so no email goes out.
+      if (adminPasswordHash)
+        await setPasswordByAdmin(
+          this.deps,
+          tx,
+          {
+            tenantId,
+            membershipId: invite.membershipId,
+            passwordHash: adminPasswordHash,
+            reason: 'First school admin login created by the platform team',
+          },
+          { ...actor, tenantId },
+        );
 
       await this.setStatus(tx, tenant, 'ACTIVE', 'Provisioning completed', actor);
       await recordAudit(tx, actor, {
@@ -500,6 +520,7 @@ export class TenantService {
           subscription_id: started.id,
           invoice_id: started.invoiceId,
           admin_email: input.admin.email,
+          admin_login: adminPasswordHash ? 'PASSWORD_SET' : 'INVITED',
         },
       });
       await publishEvent(tx, actor, {
@@ -529,8 +550,64 @@ export class TenantService {
       subscription_id: result.subscriptionId,
       invoice_id: result.invoiceId,
       admin_membership_id: result.adminMembershipId,
-      invitation_id: result.invitationId,
+      invitation_id: adminPasswordHash ? null : result.invitationId,
     };
+  }
+
+  /** The school's admins (School Admin role), with whether each login is ready to use. */
+  async listAdmins(tenantId: string) {
+    await this.getRow(tenantId);
+    const rows = await this.deps.db
+      .selectDistinct({ m: memberships, u: users })
+      .from(memberships)
+      .innerJoin(users, eq(users.id, memberships.userId))
+      .innerJoin(
+        roleAssignments,
+        and(
+          eq(roleAssignments.membershipId, memberships.id),
+          eq(roleAssignments.status, 'ACTIVE'),
+        ),
+      )
+      .innerJoin(
+        roles,
+        and(eq(roles.id, roleAssignments.roleId), eq(roles.code, 'SCHOOL_ADMIN')),
+      )
+      .where(and(eq(memberships.tenantId, tenantId), ne(memberships.status, 'REVOKED')))
+      .orderBy(memberships.createdAt);
+    return rows.map(({ m, u }) => ({
+      membership_id: m.id,
+      email: u.email,
+      first_name: u.firstName,
+      last_name: u.lastName,
+      status: m.status,
+      last_login_at: u.lastLoginAt,
+    }));
+  }
+
+  /**
+   * The platform team sets or resets a school admin's password (onboarding handover, or a
+   * forgotten password while email delivery is not built). Signs the admin out everywhere.
+   */
+  async setAdminPassword(tenantId: string, membershipId: string, password: string, actor: Actor) {
+    const admins = await this.listAdmins(tenantId);
+    if (!admins.some((a) => a.membership_id === membershipId))
+      throw new NotFoundError('School admin');
+    const passwordHash = await hashPassword(password);
+    await this.deps.db.transaction((tx) =>
+      setPasswordByAdmin(
+        this.deps,
+        tx,
+        {
+          tenantId,
+          membershipId,
+          passwordHash,
+          reason: 'School admin password set by the platform team',
+        },
+        { ...actor, tenantId },
+      ),
+    );
+    await this.authz.invalidateTenant(tenantId);
+    return (await this.listAdmins(tenantId)).find((a) => a.membership_id === membershipId)!;
   }
 
   /** Replace the governing subscription (plan change, renewal, conversion from trial). History is preserved. */

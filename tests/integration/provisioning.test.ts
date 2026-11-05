@@ -98,6 +98,54 @@ describe('Milestone 1 — platform admin → school → admin invitation → log
     expect(code(again)).toBe('INVALID_STATE');
   });
 
+  it('lets the platform team hand over a ready login (password set, no email) and reset it', async () => {
+    const root = await h.superAdmin();
+    const schoolCode = uniq('school');
+    const created = await root.post('/platform/tenants', { code: schoolCode, name: 'Handover' });
+    const tenantId = created.body.data.id;
+    const email = `${schoolCode}@school.test`;
+
+    const weak = await root.post(`/platform/tenants/${tenantId}/provision`, {
+      plan_code: 'STARTER',
+      admin: { email, first_name: 'A', password: 'short' },
+    });
+    expect(weak.status).toBe(422);
+
+    const prov = await root.post(`/platform/tenants/${tenantId}/provision`, {
+      plan_code: 'STARTER',
+      admin: { email, first_name: 'Asha', password: 'Welcome123' },
+    });
+    expect(prov.status, JSON.stringify(prov.body)).toBe(200);
+    expect(prov.body.data.invitation_id).toBeNull();
+
+    // No invitation email is left to send, and the admin can sign in straight away.
+    const [inv] = await h.deps.db.select().from(invitations).where(eq(invitations.email, email));
+    expect(inv!.status).toBe('REVOKED');
+    await h.login(email, 'Welcome123');
+
+    const admins = await root.get(`/platform/tenants/${tenantId}/admins`);
+    expect(admins.status).toBe(200);
+    expect(admins.body.data).toHaveLength(1);
+    expect(admins.body.data[0]).toMatchObject({ email, first_name: 'Asha', status: 'ACTIVE' });
+
+    const membershipId = admins.body.data[0].membership_id;
+    const reset = await root.put(
+      `/platform/tenants/${tenantId}/admins/${membershipId}/password`,
+      { password: 'Changed456' },
+    );
+    expect(reset.status, JSON.stringify(reset.body)).toBe(200);
+    await h.login(email, 'Changed456');
+
+    // Only this school's admins can be reset through this school.
+    const other = await h.provisionSchool({ plan: 'STARTER' });
+    const otherAdmins = await root.get(`/platform/tenants/${other.tenantId}/admins`);
+    const wrong = await root.put(
+      `/platform/tenants/${tenantId}/admins/${otherAdmins.body.data[0].membership_id}/password`,
+      { password: 'Changed456' },
+    );
+    expect(wrong.status).toBe(404);
+  });
+
   it('refuses to provision twice and rejects duplicate school codes', async () => {
     const root = await h.superAdmin();
     const schoolCode = uniq('school');
