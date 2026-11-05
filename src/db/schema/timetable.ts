@@ -1,6 +1,4 @@
-import { sql } from 'drizzle-orm';
 import {
-  date,
   foreignKey,
   index,
   int,
@@ -12,26 +10,20 @@ import {
   uniqueIndex,
   varchar,
 } from 'drizzle-orm/mysql-core';
-import { createdAt, dt, id, ref, updatedAt, version } from './_columns.js';
-import { academicSections, academicYears, subjectOfferings } from './academic.js';
-import {
-  PERIOD_KIND,
-  PERIOD_STATUS,
-  TIMETABLE_ENTRY_STATUS,
-  TIMETABLE_STATUS,
-  VENUE_STATUS,
-  VENUE_TYPE,
-} from './enums.js';
+import { createdAt, id, ref, updatedAt, version } from './_columns.js';
+import { academicClasses, academicSections, academicYears, subjectOfferings } from './academic.js';
+import { OVERRIDE_KIND, PERIOD_KIND, PERIOD_STATUS, VENUE_STATUS, VENUE_TYPE } from './enums.js';
 import { teachers, teachingAssignments } from './teachers.js';
 import { tenants } from './tenancy.js';
 
 /**
- * Timetable (Part 22 / Part 37). Timetable owns scheduling only: bell schedule,
- * venues, timetable versions and their entries. It REFERENCES academic
- * structure, teachers and teaching assignments through composite foreign keys
- * `(tenant_id, x_id)`, so the database refuses cross-school references. Clash
- * rules are enforced by the service AND by UNIQUE keys on generated columns
- * (partial unique indexes, expressed for MySQL).
+ * Timetable: ONE live timetable, no versions. Each section (or class without
+ * sections) has its own periods; a lesson period carries its subject offering
+ * and teacher, so the week is periods × working days, with optional per-weekday
+ * overrides. References to academic structure, teachers and assignments use
+ * composite foreign keys `(tenant_id, x_id)`, so cross-school links are refused.
+ * Teacher / venue clashes (overlapping times on a weekday) are enforced by the
+ * service, serialised on the school's settings row.
  */
 
 /** One row per school, created lazily: the teaching days of the week (ISO: 1 = Monday … 7 = Sunday). */
@@ -48,44 +40,6 @@ export const timetableSettings = mysqlTable('timetable_settings', {
   createdAt: createdAt(),
   updatedAt: updatedAt(),
 });
-
-/** A reusable slot of the school day (Period 1 08:30–09:15, Break, Lunch …). Not versioned. */
-export const timetablePeriods = mysqlTable(
-  'timetable_periods',
-  {
-    id: id(),
-    tenantId: ref('tenant_id')
-      .notNull()
-      .references(() => tenants.id),
-    /** Stable identifier, unique per school (upper-case). */
-    code: varchar('code', { length: 32 }).notNull(),
-    name: varchar('name', { length: 80 }).notNull(),
-    startTime: time('start_time').notNull(),
-    endTime: time('end_time').notNull(),
-    kind: mysqlEnum('kind', PERIOD_KIND).notNull().default('LESSON'),
-    /** Tie-break for display; the day is ordered by start time first. */
-    displayOrder: int('display_order').notNull().default(0),
-    /**
-     * Who the period is for. Both null = the whole school (the default day).
-     * A class (or one section of it) can have its own periods; the most specific
-     * set that exists wins for a section: its own, else its class's, else the school's.
-     */
-    academicClassId: ref('academic_class_id'),
-    academicSectionId: ref('academic_section_id'),
-    status: mysqlEnum('status', PERIOD_STATUS).notNull().default('ACTIVE'),
-    version: version(),
-    createdBy: ref('created_by'),
-    createdAt: createdAt(),
-    updatedBy: ref('updated_by'),
-    updatedAt: updatedAt(),
-  },
-  (t) => [
-    uniqueIndex('timetable_periods_tenant_id_uq').on(t.tenantId, t.id),
-    uniqueIndex('timetable_periods_tenant_code_uq').on(t.tenantId, t.code),
-    index('timetable_periods_tenant_status_idx').on(t.tenantId, t.status, t.startTime),
-    index('timetable_periods_scope_idx').on(t.tenantId, t.academicClassId, t.academicSectionId),
-  ],
-);
 
 /** A schedulable location (classroom, lab, hall). V1 keeps rooms inside Timetable (Part 37 §37.43). */
 export const timetableVenues = mysqlTable(
@@ -114,41 +68,42 @@ export const timetableVenues = mysqlTable(
   ],
 );
 
-/**
- * A timetable version for one academic year. `version_no` numbers the schedule
- * versions of a year (1, 2, 3 …); `version` is the optimistic-concurrency
- * counter every editable row carries.
- */
-export const timetables = mysqlTable(
-  'timetables',
+/** A slot of a section's (or class's) school day: Period 1 08:30–09:15 Hindi · Mrs Rao, Break, Lunch … */
+export const timetablePeriods = mysqlTable(
+  'timetable_periods',
   {
     id: id(),
     tenantId: ref('tenant_id')
       .notNull()
       .references(() => tenants.id),
-    academicYearId: ref('academic_year_id').notNull(),
-    name: varchar('name', { length: 120 }).notNull(),
-    status: mysqlEnum('status', TIMETABLE_STATUS).notNull().default('DRAFT'),
-    versionNo: int('version_no').notNull(),
-    effectiveFrom: date('effective_from', { mode: 'string' }),
-    effectiveTo: date('effective_to', { mode: 'string' }),
-    notes: varchar('notes', { length: 500 }),
-    /** The version this one was duplicated from (history of how the schedule evolved). */
-    copiedFromId: ref('copied_from_id'),
-    /** Set on the version that was replaced when another one was published. */
-    supersededById: ref('superseded_by_id'),
+    /** Stable identifier, unique per school (upper-case). */
+    code: varchar('code', { length: 32 }).notNull(),
+    name: varchar('name', { length: 80 }).notNull(),
+    startTime: time('start_time').notNull(),
+    endTime: time('end_time').notNull(),
+    kind: mysqlEnum('kind', PERIOD_KIND).notNull().default('LESSON'),
+    /** Tie-break for display; the day is ordered by start time first. */
+    displayOrder: int('display_order').notNull().default(0),
     /**
-     * Generated: the academic year while PUBLISHED, NULL otherwise. UNIQUE on it =
-     * at most one published timetable per year, history unrestricted.
+     * Whose day the period belongs to: a section (class set too), a class without
+     * sections (section NULL), or neither = the School default day (a template that
+     * sections copy times from; it takes no lessons).
      */
-    publishedKey: varchar('published_key', { length: 36 }).generatedAlwaysAs(
-      sql`(IF(\`status\` = 'PUBLISHED', \`academic_year_id\`, NULL))`,
-      { mode: 'virtual' },
-    ),
-    publishedAt: dt('published_at'),
-    publishedBy: ref('published_by'),
-    archivedAt: dt('archived_at'),
-    archivedBy: ref('archived_by'),
+    academicClassId: ref('academic_class_id'),
+    academicSectionId: ref('academic_section_id'),
+    /** The year of the section / class day. NULL only for the School default day (a template). */
+    academicYearId: ref('academic_year_id'),
+    /** Lesson periods of a section or class: what is taught, by whom, where (every working day). */
+    subjectOfferingId: ref('subject_offering_id'),
+    teachingAssignmentId: ref('teaching_assignment_id'),
+    teacherId: ref('teacher_id'),
+    venueId: ref('venue_id'),
+    /**
+     * The weekdays (ISO 1–7) the period runs on; NULL = every working day. Lets one
+     * day (e.g. Friday) have its own times: its periods carry `[5]`, the others `[1,2,3,4]`.
+     */
+    daysOfWeek: json('days_of_week').$type<number[] | null>(),
+    status: mysqlEnum('status', PERIOD_STATUS).notNull().default('ACTIVE'),
     version: version(),
     createdBy: ref('created_by'),
     createdAt: createdAt(),
@@ -156,67 +111,70 @@ export const timetables = mysqlTable(
     updatedAt: updatedAt(),
   },
   (t) => [
-    uniqueIndex('timetables_tenant_id_uq').on(t.tenantId, t.id),
-    uniqueIndex('timetables_tenant_id_year_uq').on(t.tenantId, t.id, t.academicYearId),
-    uniqueIndex('timetables_version_no_uq').on(t.tenantId, t.academicYearId, t.versionNo),
-    uniqueIndex('timetables_published_uq').on(t.publishedKey),
-    index('timetables_year_status_idx').on(t.tenantId, t.academicYearId, t.status),
+    uniqueIndex('timetable_periods_tenant_id_uq').on(t.tenantId, t.id),
+    uniqueIndex('timetable_periods_tenant_code_uq').on(t.tenantId, t.code),
+    index('timetable_periods_tenant_status_idx').on(t.tenantId, t.status, t.startTime),
+    index('timetable_periods_scope_idx').on(t.tenantId, t.academicClassId, t.academicSectionId),
+    index('timetable_periods_year_idx').on(t.tenantId, t.academicYearId),
+    index('timetable_periods_teacher_idx').on(t.tenantId, t.teacherId),
     foreignKey({
-      name: 'timetables_year_fk',
+      name: 'timetable_periods_class_fk',
+      columns: [t.tenantId, t.academicClassId],
+      foreignColumns: [academicClasses.tenantId, academicClasses.id],
+    }),
+    foreignKey({
+      name: 'timetable_periods_section_fk',
+      columns: [t.tenantId, t.academicSectionId],
+      foreignColumns: [academicSections.tenantId, academicSections.id],
+    }),
+    foreignKey({
+      name: 'timetable_periods_year_fk',
       columns: [t.tenantId, t.academicYearId],
       foreignColumns: [academicYears.tenantId, academicYears.id],
     }),
     foreignKey({
-      name: 'timetables_copied_from_fk',
-      columns: [t.tenantId, t.copiedFromId],
-      foreignColumns: [t.tenantId, t.id],
+      name: 'timetable_periods_offering_fk',
+      columns: [t.tenantId, t.subjectOfferingId],
+      foreignColumns: [subjectOfferings.tenantId, subjectOfferings.id],
     }),
     foreignKey({
-      name: 'timetables_superseded_by_fk',
-      columns: [t.tenantId, t.supersededById],
-      foreignColumns: [t.tenantId, t.id],
+      name: 'timetable_periods_assignment_fk',
+      columns: [t.tenantId, t.teachingAssignmentId],
+      foreignColumns: [teachingAssignments.tenantId, teachingAssignments.id],
+    }),
+    foreignKey({
+      name: 'timetable_periods_teacher_fk',
+      columns: [t.tenantId, t.teacherId],
+      foreignColumns: [teachers.tenantId, teachers.id],
+    }),
+    foreignKey({
+      name: 'timetable_periods_venue_fk',
+      columns: [t.tenantId, t.venueId],
+      foreignColumns: [timetableVenues.tenantId, timetableVenues.id],
     }),
   ],
 );
 
 /**
- * One scheduled lesson: a section has a subject offering, taught by a teacher
- * (through an existing teaching assignment), in a period of a weekday,
- * optionally in a venue. The teacher is copied from the assignment so the
- * database can forbid double-booking; the service keeps the two in step.
+ * A weekday exception of one lesson period: on that weekday the period has a
+ * different subject / teacher / venue (LESSON), or no lesson at all (FREE).
+ * Example: Period 1 is Hindi, but every Friday it is Sports.
  */
-export const timetableEntries = mysqlTable(
-  'timetable_entries',
+export const timetableDayOverrides = mysqlTable(
+  'timetable_day_overrides',
   {
     id: id(),
     tenantId: ref('tenant_id')
       .notNull()
       .references(() => tenants.id),
-    timetableId: ref('timetable_id').notNull(),
-    /** Copied from the timetable so composite keys can pin section and offering to the same year. */
-    academicYearId: ref('academic_year_id').notNull(),
+    periodId: ref('period_id').notNull(),
     /** ISO weekday: 1 = Monday … 7 = Sunday. */
     dayOfWeek: smallint('day_of_week').notNull(),
-    periodId: ref('period_id').notNull(),
-    sectionId: ref('section_id').notNull(),
-    subjectOfferingId: ref('subject_offering_id').notNull(),
-    teachingAssignmentId: ref('teaching_assignment_id').notNull(),
-    teacherId: ref('teacher_id').notNull(),
+    kind: mysqlEnum('kind', OVERRIDE_KIND).notNull().default('LESSON'),
+    subjectOfferingId: ref('subject_offering_id'),
+    teachingAssignmentId: ref('teaching_assignment_id'),
+    teacherId: ref('teacher_id'),
     venueId: ref('venue_id'),
-    status: mysqlEnum('status', TIMETABLE_ENTRY_STATUS).notNull().default('ACTIVE'),
-    /** Generated occupancy keys: set while ACTIVE, so UNIQUE forbids a second lesson in the same slot. */
-    sectionSlotKey: varchar('section_slot_key', { length: 120 }).generatedAlwaysAs(
-      sql`(IF(\`status\` = 'ACTIVE', CONCAT(\`timetable_id\`, ':', \`section_id\`, ':', \`day_of_week\`, ':', \`period_id\`), NULL))`,
-      { mode: 'virtual' },
-    ),
-    teacherSlotKey: varchar('teacher_slot_key', { length: 120 }).generatedAlwaysAs(
-      sql`(IF(\`status\` = 'ACTIVE', CONCAT(\`timetable_id\`, ':', \`teacher_id\`, ':', \`day_of_week\`, ':', \`period_id\`), NULL))`,
-      { mode: 'virtual' },
-    ),
-    venueSlotKey: varchar('venue_slot_key', { length: 120 }).generatedAlwaysAs(
-      sql`(IF(\`status\` = 'ACTIVE' AND \`venue_id\` IS NOT NULL, CONCAT(\`timetable_id\`, ':', \`venue_id\`, ':', \`day_of_week\`, ':', \`period_id\`), NULL))`,
-      { mode: 'virtual' },
-    ),
     version: version(),
     createdBy: ref('created_by'),
     createdAt: createdAt(),
@@ -224,56 +182,31 @@ export const timetableEntries = mysqlTable(
     updatedAt: updatedAt(),
   },
   (t) => [
-    uniqueIndex('timetable_entries_tenant_id_uq').on(t.tenantId, t.id),
-    uniqueIndex('timetable_entries_section_slot_uq').on(t.sectionSlotKey),
-    uniqueIndex('timetable_entries_teacher_slot_uq').on(t.teacherSlotKey),
-    uniqueIndex('timetable_entries_venue_slot_uq').on(t.venueSlotKey),
-    index('timetable_entries_slot_idx').on(t.tenantId, t.timetableId, t.dayOfWeek, t.periodId),
-    index('timetable_entries_section_idx').on(t.tenantId, t.timetableId, t.sectionId),
-    index('timetable_entries_teacher_idx').on(t.tenantId, t.timetableId, t.teacherId),
-    index('timetable_entries_venue_idx').on(t.tenantId, t.venueId),
-    index('timetable_entries_period_idx').on(t.tenantId, t.periodId),
-    index('timetable_entries_assignment_idx').on(t.tenantId, t.teachingAssignmentId),
+    uniqueIndex('timetable_day_overrides_tenant_id_uq').on(t.tenantId, t.id),
+    uniqueIndex('timetable_day_overrides_slot_uq').on(t.periodId, t.dayOfWeek),
+    index('timetable_day_overrides_teacher_idx').on(t.tenantId, t.teacherId),
     foreignKey({
-      name: 'timetable_entries_timetable_fk',
-      columns: [t.tenantId, t.timetableId, t.academicYearId],
-      foreignColumns: [timetables.tenantId, timetables.id, timetables.academicYearId],
-    }),
-    foreignKey({
-      name: 'timetable_entries_period_fk',
+      name: 'timetable_day_overrides_period_fk',
       columns: [t.tenantId, t.periodId],
       foreignColumns: [timetablePeriods.tenantId, timetablePeriods.id],
+    }).onDelete('cascade'),
+    foreignKey({
+      name: 'timetable_day_overrides_offering_fk',
+      columns: [t.tenantId, t.subjectOfferingId],
+      foreignColumns: [subjectOfferings.tenantId, subjectOfferings.id],
     }),
     foreignKey({
-      name: 'timetable_entries_section_fk',
-      columns: [t.tenantId, t.sectionId, t.academicYearId],
-      foreignColumns: [
-        academicSections.tenantId,
-        academicSections.id,
-        academicSections.academicYearId,
-      ],
-    }),
-    foreignKey({
-      name: 'timetable_entries_offering_fk',
-      columns: [t.tenantId, t.subjectOfferingId, t.academicYearId],
-      foreignColumns: [
-        subjectOfferings.tenantId,
-        subjectOfferings.id,
-        subjectOfferings.academicYearId,
-      ],
-    }),
-    foreignKey({
-      name: 'timetable_entries_assignment_fk',
+      name: 'timetable_day_overrides_assignment_fk',
       columns: [t.tenantId, t.teachingAssignmentId],
       foreignColumns: [teachingAssignments.tenantId, teachingAssignments.id],
     }),
     foreignKey({
-      name: 'timetable_entries_teacher_fk',
+      name: 'timetable_day_overrides_teacher_fk',
       columns: [t.tenantId, t.teacherId],
       foreignColumns: [teachers.tenantId, teachers.id],
     }),
     foreignKey({
-      name: 'timetable_entries_venue_fk',
+      name: 'timetable_day_overrides_venue_fk',
       columns: [t.tenantId, t.venueId],
       foreignColumns: [timetableVenues.tenantId, timetableVenues.id],
     }),

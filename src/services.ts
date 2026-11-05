@@ -1,58 +1,69 @@
-import type { Deps } from './container.js';
-import { AuthorizationService } from './modules/access/authorization.service.js';
-import { AcademicService } from './modules/academic/academic.service.js';
-import { AdmissionService } from './modules/students/admissions.service.js';
-import { EnrollmentService } from './modules/students/enrollments.service.js';
-import { GuardianService } from './modules/students/guardians.service.js';
-import { AttendanceConfigService } from './modules/attendance/config.service.js';
-import { CorrectionService } from './modules/attendance/corrections.service.js';
-import { ReportService } from './modules/attendance/reports.service.js';
-import { SessionService } from './modules/attendance/sessions.service.js';
-import { ExamService } from './modules/exams/exams.service.js';
-import { TimetableConfigService } from './modules/timetable/config.service.js';
-import { EntryService } from './modules/timetable/entries.service.js';
-import { TimetableService } from './modules/timetable/timetables.service.js';
-import { ViewService } from './modules/timetable/views.service.js';
-import { AssignmentService } from './modules/teachers/assignments.service.js';
-import { ClassTeacherService } from './modules/teachers/class-teachers.service.js';
-import { StaffReportService } from './modules/teachers/staff-reports.service.js';
-import { StudentConfigService } from './modules/students/config.service.js';
-import { StaffImportService } from './modules/teachers/import.service.js';
-import { StaffLookupService } from './modules/teachers/lookups.service.js';
-import { StaffDocumentService } from './modules/teachers/documents.service.js';
-import { LeaveService } from './modules/teachers/leave.service.js';
-import { CalendarService } from './modules/calendar/calendar.service.js';
-import { StaffAttendanceService } from './modules/teachers/staff-attendance.service.js';
-import { QualificationService } from './modules/teachers/qualifications.service.js';
-import { TeacherService } from './modules/teachers/teachers.service.js';
-import { AdjustmentService } from './modules/fees/adjustments.service.js';
-import { AssignmentService as FeeAssignmentService } from './modules/fees/assignments.service.js';
-import { FeeConfigService } from './modules/fees/config.service.js';
-import { DemandService } from './modules/fees/demands.service.js';
-import { ArrearsService } from './modules/fees/arrears.service.js';
-import { FeeDocumentService } from './modules/fees/documents.service.js';
-import { ReconciliationService } from './modules/fees/reconciliation.service.js';
-import { PaymentService } from './modules/fees/payments.service.js';
-import { RefundService } from './modules/fees/refunds.service.js';
-import { FeeReportService } from './modules/fees/reports.service.js';
-import { FileService } from './modules/files/files.service.js';
-import { StudentDocumentService } from './modules/students/documents.service.js';
-import { ClassOverviewService } from './modules/academic/overview.service.js';
-import { StudentCertificateService } from './modules/students/certificates.service.js';
-import { StudentReportService } from './modules/students/reports.service.js';
-import { StudentImportService } from './modules/students/import.service.js';
-import { StudentExitService } from './modules/students/exits.service.js';
-import { StudentService } from './modules/students/students.service.js';
-import { RoleService } from './modules/access/roles.service.js';
-import { EntitlementService } from './modules/entitlements/entitlements.service.js';
-import { AuthService } from './modules/identity/auth.service.js';
-import { TokenService } from './modules/identity/tokens.js';
-import { BillingService } from './modules/billing/billing.service.js';
-import { PlanService } from './modules/plans/plans.service.js';
-import { MemberService } from './modules/members/members.service.js';
-import { SchoolSetupService } from './modules/tenants/school-setup.service.js';
-import { TenantService } from './modules/tenants/tenants.service.js';
-import { TeacherAppService } from './modules/teacher-app/teacher-app.service.js';
+import type { Deps } from "./container.js";
+import { AuthorizationService } from "./modules/access/authorization.service.js";
+import { AcademicService } from "./modules/academic/academic.service.js";
+import { AdmissionService } from "./modules/students/admissions.service.js";
+import { EnrollmentService } from "./modules/students/enrollments.service.js";
+import { GuardianService } from "./modules/students/guardians.service.js";
+import { AttendanceConfigService } from "./modules/attendance/config.service.js";
+import { CorrectionService } from "./modules/attendance/corrections.service.js";
+import { ReportService } from "./modules/attendance/reports.service.js";
+import { SessionService } from "./modules/attendance/sessions.service.js";
+import { ExamService } from "./modules/exams/exams.service.js";
+import { ExamTimetableService } from "./modules/exams/timetable.service.js";
+import { TimetableConfigService } from "./modules/timetable/config.service.js";
+import { PeriodService } from "./modules/timetable/periods.service.js";
+import { ViewService } from "./modules/timetable/views.service.js";
+import { AssignmentService } from "./modules/teachers/assignments.service.js";
+import { ClassTeacherService } from "./modules/teachers/class-teachers.service.js";
+import { StaffReportService } from "./modules/teachers/staff-reports.service.js";
+import { StudentConfigService } from "./modules/students/config.service.js";
+import { StaffImportService } from "./modules/teachers/import.service.js";
+import { StaffLookupService } from "./modules/teachers/lookups.service.js";
+import { TeacherAttendanceService } from "./modules/teachers/teacher-attendance.service.js";
+import { TeacherRegisterService } from "./modules/teachers/teacher-register.service.js";
+import { StaffDocumentService } from "./modules/teachers/documents.service.js";
+import { CalendarService } from "./modules/calendar/calendar.service.js";
+import { QualificationService } from "./modules/teachers/qualifications.service.js";
+import { TeacherService } from "./modules/teachers/teachers.service.js";
+import { AdjustmentService } from "./modules/fees/adjustments.service.js";
+import { AssignmentService as FeeAssignmentService } from "./modules/fees/assignments.service.js";
+import { FeeConfigService } from "./modules/fees/config.service.js";
+import { DemandService } from "./modules/fees/demands.service.js";
+import { ArrearsService } from "./modules/fees/arrears.service.js";
+import { FeeDocumentService } from "./modules/fees/documents.service.js";
+import { ReconciliationService } from "./modules/fees/reconciliation.service.js";
+import { PaymentService } from "./modules/fees/payments.service.js";
+import { RefundService } from "./modules/fees/refunds.service.js";
+import { LearnerFeesService } from "./modules/fees/learner-fees.service.js";
+import { FeeReportService } from "./modules/fees/reports.service.js";
+import { FileService } from "./modules/files/files.service.js";
+import { StudentDocumentService } from "./modules/students/documents.service.js";
+import { ClassOverviewService } from "./modules/academic/overview.service.js";
+import { StudentCertificateService } from "./modules/students/certificates.service.js";
+import { StudentReportService } from "./modules/students/reports.service.js";
+import { StudentImportService } from "./modules/students/import.service.js";
+import { StudentExitService } from "./modules/students/exits.service.js";
+import { StudentService } from "./modules/students/students.service.js";
+import { RoleService } from "./modules/access/roles.service.js";
+import { EntitlementService } from "./modules/entitlements/entitlements.service.js";
+import { AppPinService } from "./modules/identity/app-pin.js";
+import { AuthService } from "./modules/identity/auth.service.js";
+import { TokenService } from "./modules/identity/tokens.js";
+import { BillingService } from "./modules/billing/billing.service.js";
+import { PlanService } from "./modules/plans/plans.service.js";
+import { MemberService } from "./modules/members/members.service.js";
+import { SchoolSetupService } from "./modules/tenants/school-setup.service.js";
+import { TenantService } from "./modules/tenants/tenants.service.js";
+import { TeacherAppService } from "./modules/teacher-app/teacher-app.service.js";
+import { TeacherExamService } from "./modules/teacher-app/teacher-exams.service.js";
+import { TeacherNotificationService } from "./modules/teacher-notifications/teacher-notifications.service.js";
+import { ExamRemarkService } from "./modules/exams/remarks.service.js";
+import { NoticeService } from "./modules/notices/notices.service.js";
+import { GuardianAccessService } from "./modules/parent-app/guardian-access.service.js";
+import { ParentAppService } from "./modules/parent-app/parent-app.service.js";
+import { ParentRequestService } from "./modules/parent-app/parent-requests.service.js";
+import { RollNumberService } from "./modules/students/roll-numbers.js";
+import { DashboardService } from "./modules/dashboard/dashboard.service.js";
 
 export function buildServices(deps: Deps) {
   const tokens = new TokenService(deps.env);
@@ -61,7 +72,8 @@ export function buildServices(deps: Deps) {
   const plans = new PlanService(deps, entitlements);
   const roles = new RoleService(deps, authz);
   const members = new MemberService(deps, authz, roles);
-  const auth = new AuthService(deps, tokens, authz);
+  const pins = new AppPinService(deps);
+  const auth = new AuthService(deps, tokens, authz, pins);
   const billing = new BillingService(deps);
   const tenants = new TenantService(deps, entitlements, authz, billing);
   const schoolSetup = new SchoolSetupService(deps);
@@ -78,12 +90,16 @@ export function buildServices(deps: Deps) {
   const classTeachers = new ClassTeacherService(deps);
   const staffDocuments = new StaffDocumentService(deps, fileService);
   const calendar = new CalendarService(deps);
-  const leave = new LeaveService(deps, calendar);
-  const staffAttendance = new StaffAttendanceService(deps, leave, calendar);
+  const teacherAttendance = new TeacherAttendanceService(deps, calendar);
+  const teacherRegister = new TeacherRegisterService(deps, calendar);
   const studentConfig = new StudentConfigService(deps);
   const studentReports = new StudentReportService(deps);
   const classOverview = new ClassOverviewService(deps);
-  const studentCertificates = new StudentCertificateService(deps, fileService, schoolSetup);
+  const studentCertificates = new StudentCertificateService(
+    deps,
+    fileService,
+    schoolSetup,
+  );
   const studentImport = new StudentImportService(
     deps,
     students,
@@ -100,18 +116,32 @@ export function buildServices(deps: Deps) {
     classTeachers,
     staffLookups,
     calendar,
+    pins,
   );
   const staffReports = new StaffReportService(deps);
   const staffImport = new StaffImportService(deps, teachers, staffLookups);
   const attendanceConfig = new AttendanceConfigService(deps);
-  const attendanceSessions = new SessionService(deps, attendanceConfig, calendar);
-  const attendanceCorrections = new CorrectionService(deps, attendanceConfig, attendanceSessions);
-  const attendanceReports = new ReportService(deps, attendanceConfig, attendanceSessions);
+  const attendanceSessions = new SessionService(
+    deps,
+    attendanceConfig,
+    calendar,
+  );
+  const attendanceCorrections = new CorrectionService(
+    deps,
+    attendanceConfig,
+    attendanceSessions,
+  );
+  const attendanceReports = new ReportService(
+    deps,
+    attendanceConfig,
+    attendanceSessions,
+    calendar,
+  );
   const timetableConfig = new TimetableConfigService(deps);
-  const timetables = new TimetableService(deps, timetableConfig);
-  const timetableEntries = new EntryService(deps, timetableConfig);
+  const timetablePeriods = new PeriodService(deps, timetableConfig);
   const timetableViews = new ViewService(deps, timetableConfig);
   const exams = new ExamService(deps);
+  const examTimetable = new ExamTimetableService(deps);
   const feeConfig = new FeeConfigService(deps);
   const feeAssignments = new FeeAssignmentService(deps);
   // New and moved students are billed their class fees automatically.
@@ -126,7 +156,43 @@ export function buildServices(deps: Deps) {
   const feeReconciliation = new ReconciliationService(deps, feePayments);
   const feeArrears = new ArrearsService(deps);
   const feeReports = new FeeReportService(deps);
-  const teacherApp = new TeacherAppService(deps, classTeachers, attendanceReports, timetableViews);
+  const learnerFees = new LearnerFeesService(deps);
+  const teacherApp = new TeacherAppService(
+    deps,
+    classTeachers,
+    attendanceReports,
+    timetableViews,
+  );
+  const teacherExams = new TeacherExamService(deps, teacherApp, exams, examTimetable);
+  const teacherNotifications = new TeacherNotificationService(deps);
+  // Parent app (0045): logins for guardians, notices, report-card remarks, roll numbers.
+  const examRemarks = new ExamRemarkService(deps);
+  const notices = new NoticeService(deps, fileService);
+  const guardianAccess = new GuardianAccessService(deps, authz);
+  const rollNumbers = new RollNumberService(deps);
+  const parentApp = new ParentAppService(deps, {
+    attendanceReports,
+    calendar,
+    exams,
+    remarks: examRemarks,
+    learnerFees,
+    feeDocuments,
+    schoolSetup,
+    files: fileService,
+    notices,
+  });
+  // Parent requests (0046): own profile, child-detail change requests, complaints & feedback.
+  const parentRequests = new ParentRequestService(deps, students);
+  // School admin home page (reads the modules above).
+  const dashboard = new DashboardService(deps, {
+    attendanceReports,
+    learnerFees,
+    teacherAttendance,
+    exams,
+    parentRequests,
+    classOverview,
+    calendar,
+  });
   return {
     tokens,
     authz,
@@ -135,6 +201,7 @@ export function buildServices(deps: Deps) {
     billing,
     roles,
     members,
+    pins,
     auth,
     tenants,
     schoolSetup,
@@ -160,17 +227,17 @@ export function buildServices(deps: Deps) {
     staffReports,
     staffDocuments,
     calendar,
-    leave,
-    staffAttendance,
+    teacherAttendance,
+    teacherRegister,
     attendanceConfig,
     attendanceSessions,
     attendanceCorrections,
     attendanceReports,
     timetableConfig,
-    timetables,
-    timetableEntries,
+    timetablePeriods,
     timetableViews,
     exams,
+    examTimetable,
     feeConfig,
     feeAssignments,
     feeDemands,
@@ -181,7 +248,17 @@ export function buildServices(deps: Deps) {
     feeReconciliation,
     feeArrears,
     feeReports,
+    learnerFees,
     teacherApp,
+    teacherExams,
+    teacherNotifications,
+    examRemarks,
+    notices,
+    guardianAccess,
+    rollNumbers,
+    parentApp,
+    parentRequests,
+    dashboard,
   };
 }
 

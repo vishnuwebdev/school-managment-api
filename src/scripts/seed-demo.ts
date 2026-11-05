@@ -254,7 +254,7 @@ async function main() {
       admin: { email: s.admin[0], first_name: s.admin[1], last_name: s.admin[2] },
     });
     // The teacher app is a paid add-on: switch it on for the demo schools that
-    // have timetable and leave (Standard and Premium).
+    // have the timetable (Standard and Premium).
     if (s.plan !== 'STARTER') {
       await ok(
         'put',
@@ -547,7 +547,7 @@ async function seedAcademics() {
 }
 
 /**
- * Teachers and staff, qualifications and teaching assignments for the two demo
+ * Teachers, qualifications and teaching assignments for the two demo
  * schools. Runs after seedAcademics (assignments need its subject offerings).
  * Idempotent: a school that already has teachers is skipped.
  */
@@ -555,7 +555,6 @@ async function seedTeachers() {
   type Person = {
     first: string;
     last: string;
-    type?: 'TEACHING' | 'NON_TEACHING';
     status?: 'PROSPECTIVE' | 'ONBOARDING' | 'ACTIVE';
     then?: 'start-leave' | 'resign';
     dept: string;
@@ -677,27 +676,6 @@ async function seedTeachers() {
           then: 'resign',
           teaches: [{ subject: 'ART', grades: [7, 8] }],
         },
-        {
-          first: 'Geeta',
-          last: 'Sinha',
-          type: 'NON_TEACHING',
-          dept: 'Administration',
-          title: 'Office Administrator',
-          joined: '2017-01-16',
-          dob: '1984-04-04',
-          gender: 'FEMALE',
-        },
-        {
-          first: 'Ishita',
-          last: 'Malhotra',
-          type: 'NON_TEACHING',
-          status: 'ONBOARDING',
-          dept: 'Administration',
-          title: 'Front Desk Executive',
-          joined: '2026-10-01',
-          dob: '1996-02-19',
-          gender: 'FEMALE',
-        },
       ],
     },
     {
@@ -740,19 +718,6 @@ async function seedTeachers() {
           teaches: [
             { subject: 'SCI', grades: [5, 6, 7, 8] },
             { subject: 'ART', grades: [5], role: 'CO_TEACHER' },
-          ],
-        },
-        {
-          first: 'Joseph',
-          last: 'Fernandes',
-          type: 'NON_TEACHING',
-          dept: 'Library',
-          title: 'Librarian',
-          joined: '2016-09-01',
-          dob: '1983-03-03',
-          gender: 'MALE',
-          quals: [
-            { type: 'DEGREE', title: 'B.Lib.I.Sc.', institution: 'Goa University', year: 2006 },
           ],
         },
         {
@@ -803,7 +768,6 @@ async function seedTeachers() {
       const teacher = await ok('post', '/teachers', token, {
         first_name: p.first,
         last_name: p.last,
-        staff_type: p.type ?? 'TEACHING',
         status: p.status ?? 'ACTIVE',
         gender: p.gender,
         date_of_birth: p.dob,
@@ -997,12 +961,12 @@ async function seedAttendance() {
 }
 
 /**
- * Timetable for the two demo schools: a bell schedule (6 lessons, break, lunch, assembly),
- * teaching days, venues and a PUBLISHED timetable for the active year built by a small
- * deterministic scheduler from the teachers, assignments and offerings seeded above
- * (no teacher, section or venue is ever double-booked), plus one DRAFT version that
- * differs from it. Idempotent: a school that already has a timetable is skipped.
- * Goes through the real API like everything else here.
+ * Timetable for the two demo schools: teaching days, venues, and for every
+ * section its own school day (assembly, 6 lesson periods, break, lunch). Each
+ * lesson period carries its subject and teacher, chosen by a small
+ * deterministic scheduler so no teacher or venue is ever double-booked; one
+ * weekday exception shows the feature. Idempotent: a school whose sections
+ * already have periods is skipped. Goes through the real API.
  */
 async function seedTimetable() {
   const targets = [
@@ -1010,26 +974,25 @@ async function seedTimetable() {
       email: 'principal.gv@example.com',
       name: 'Green Valley Public School',
       days: [1, 2, 3, 4, 5, 6], // Monday to Saturday
-      lessons: { MAT: 5, ENG: 3, SCI: 4, ART: 2 } as Record<string, number>,
     },
     {
       email: 'admin.sunrise@example.com',
       name: 'Sunrise International School',
       days: [1, 2, 3, 4, 5], // Monday to Friday
-      lessons: { MAT: 3, ENG: 3, SCI: 3, ART: 2 } as Record<string, number>,
     },
   ];
   const bell = [
-    ['ASM', 'Assembly', '08:00', '08:20', 'ASSEMBLY'],
-    ['P1', 'Period 1', '08:20', '09:00', 'LESSON'],
-    ['P2', 'Period 2', '09:00', '09:40', 'LESSON'],
-    ['P3', 'Period 3', '09:40', '10:20', 'LESSON'],
-    ['BRK', 'Break', '10:20', '10:40', 'BREAK'],
-    ['P4', 'Period 4', '10:40', '11:20', 'LESSON'],
-    ['P5', 'Period 5', '11:20', '12:00', 'LESSON'],
-    ['LUN', 'Lunch', '12:00', '12:40', 'LUNCH'],
-    ['P6', 'Period 6', '12:40', '13:20', 'LESSON'],
+    ['Assembly', '08:00', '08:20', 'ASSEMBLY'],
+    ['Period 1', '08:20', '09:00', 'LESSON'],
+    ['Period 2', '09:00', '09:40', 'LESSON'],
+    ['Period 3', '09:40', '10:20', 'LESSON'],
+    ['Break', '10:20', '10:40', 'BREAK'],
+    ['Period 4', '10:40', '11:20', 'LESSON'],
+    ['Period 5', '11:20', '12:00', 'LESSON'],
+    ['Lunch', '12:00', '12:40', 'LUNCH'],
+    ['Period 6', '12:40', '13:20', 'LESSON'],
   ] as const;
+  const order = ['MAT', 'ENG', 'SCI', 'ART'];
   for (const t of targets) {
     let token: string;
     try {
@@ -1038,13 +1001,14 @@ async function seedTimetable() {
       warnings.push(`${t.name}: timetable demo data skipped (admin cannot sign in)`);
       continue;
     }
-    const probe = await call('get', '/timetable/timetables?page_size=1', token);
+    const probe = await call('get', '/timetable/status', token);
     if (probe.status === 403) {
       warnings.push(`${t.name}: timetable demo data skipped (timetable is not in the plan)`);
       continue;
     }
     if (probe.status !== 200) throw new Error(`timetable probe → ${probe.status}`);
-    if ((probe.body.meta?.total ?? 0) > 0) {
+    const owners = (probe.body.data?.owners ?? []) as Json[];
+    if (owners.some((o) => Number(o.periods) > 0)) {
       skipped.push(`timetable for ${t.name}`);
       continue;
     }
@@ -1095,21 +1059,6 @@ async function seedTimetable() {
       version: settings.version,
       working_days: t.days,
     });
-    const period: Record<string, string> = {};
-    const existingPeriods = (await ok('get', '/timetable/periods', token)) as unknown as Json[];
-    if (existingPeriods.length === 0)
-      for (const [code, name, start, end, kind] of bell)
-        period[code] = (
-          await ok('post', '/timetable/periods', token, {
-            code,
-            name,
-            start_time: start,
-            end_time: end,
-            kind,
-          })
-        ).id as string;
-    else for (const p of existingPeriods) period[p.code as string] = p.id as string;
-    const lessonPeriods = ['P1', 'P2', 'P3', 'P4', 'P5', 'P6'].filter((c) => period[c]);
     const venue: Record<string, string> = {};
     const existingVenues = (await ok(
       'get',
@@ -1119,12 +1068,7 @@ async function seedTimetable() {
     if (existingVenues.length === 0) {
       const mk = async (code: string, name: string, type: string, capacity: number) => {
         venue[code] = (
-          await ok('post', '/timetable/venues', token, {
-            code,
-            name,
-            venue_type: type,
-            capacity,
-          })
+          await ok('post', '/timetable/venues', token, { code, name, venue_type: type, capacity })
         ).id as string;
       };
       for (const s of sections)
@@ -1139,108 +1083,82 @@ async function seedTimetable() {
       await mk('HALL', 'Assembly Hall', 'HALL', 300);
     } else for (const v of existingVenues) venue[v.code as string] = v.id as string;
 
-    // ---- the scheduler: greedy, deterministic, never double-books teacher, section or venue
-    const busy = {
-      teacher: new Set<string>(),
-      section: new Set<string>(),
-      venue: new Set<string>(),
-    };
-    const cells = new Map<string, Json[]>(); // section id → grid cells
-    let placed = 0;
-    let missed = 0;
-    let lessonsWanted = 0;
-    const D = t.days.length;
+    // ---- every section's day; a teacher / venue is never in two places at the same time
+    const busyTeacher = new Set<string>(); // `${teacher}:${start}`
+    const busyVenue = new Set<string>();
+    let periods = 0;
+    let lessons = 0;
+    let firstLesson: string | null = null;
     for (const [i, sec] of sections.entries()) {
       const room = venue[`R-${sec.class.name}${sec.code}`.replace(/\s+/g, '')] ?? null;
       const mine = offerings.filter(
         (o) => o.class.id === sec.class.id && (o.section === null || o.section?.id === sec.id),
       );
-      for (const [si, code] of Object.keys(t.lessons).entries()) {
-        const offering = mine.find((o) => o.subject.code === code);
-        if (!offering) continue;
-        const candidates = assignments.filter((a) => a.subject_offering_id === offering.id);
-        const chosen = candidates.find((a) => a.role === 'PRIMARY') ?? candidates[0];
-        const wanted = t.lessons[code]!;
-        lessonsWanted += wanted;
-        if (!chosen) {
-          missed += wanted; // nobody teaches it right now (e.g. the teacher left)
+      let li = 0;
+      for (const [name, start, end, kind] of bell) {
+        if (kind !== 'LESSON') {
+          await ok('post', '/timetable/periods', token, {
+            section_id: sec.id,
+            name,
+            start_time: start,
+            end_time: end,
+            kind,
+          });
+          periods++;
           continue;
         }
-        const teacherId = chosen.teacher.id as string;
-        const special = code === 'SCI' ? venue.LAB : code === 'ART' ? venue.ART : null;
-        const daysUsed = new Set<number>();
-        for (let j = 0; j < wanted; j++) {
-          let done = false;
-          for (let pass = 0; pass < 2 && !done; pass++) {
-            for (let dd = 0; dd < D && !done; dd++) {
-              const day = t.days[(i + si * 2 + j + dd) % D]!;
-              if (pass === 0 && daysUsed.has(day)) continue; // spread over the week first
-              for (let pp = 0; pp < lessonPeriods.length && !done; pp++) {
-                const per = lessonPeriods[(i + si + day + pp) % lessonPeriods.length]!;
-                const slot = `${day}:${per}`;
-                if (
-                  busy.section.has(`${sec.id}:${slot}`) ||
-                  busy.teacher.has(`${teacherId}:${slot}`)
-                )
-                  continue;
-                const useSpecial = special && !busy.venue.has(`${special}:${slot}`);
-                const where = useSpecial ? special : room;
-                if (where && busy.venue.has(`${where}:${slot}`)) continue;
-                busy.section.add(`${sec.id}:${slot}`);
-                busy.teacher.add(`${teacherId}:${slot}`);
-                if (where) busy.venue.add(`${where}:${slot}`);
-                daysUsed.add(day);
-                const list = cells.get(sec.id) ?? [];
-                list.push({
-                  day_of_week: day,
-                  period_id: period[per],
-                  subject_offering_id: offering.id,
-                  teacher_id: teacherId,
-                  venue_id: where,
-                });
-                cells.set(sec.id, list);
-                placed++;
-                done = true;
-              }
-            }
-          }
-          if (!done) missed++;
+        // rotate through the subjects; take the first whose teacher is free at this time
+        let placed = false;
+        for (let k = 0; k < order.length && !placed; k++) {
+          const code = order[(i + li + k) % order.length]!;
+          const offering = mine.find((o) => o.subject.code === code);
+          if (!offering) continue;
+          const cand = assignments.filter((a) => a.subject_offering_id === offering.id);
+          const chosen = cand.find((a) => a.role === 'PRIMARY') ?? cand[0];
+          if (!chosen || busyTeacher.has(`${chosen.teacher.id}:${start}`)) continue;
+          const special = code === 'SCI' ? venue.LAB : code === 'ART' ? venue.ART : null;
+          const where = special && !busyVenue.has(`${special}:${start}`) ? special : room;
+          const p = await ok('post', '/timetable/periods', token, {
+            section_id: sec.id,
+            name: `${name} · ${offering.subject.name}`,
+            start_time: start,
+            end_time: end,
+            kind: 'LESSON',
+            subject_offering_id: offering.id,
+            teacher_id: chosen.teacher.id,
+            venue_id: where,
+          });
+          busyTeacher.add(`${chosen.teacher.id}:${start}`);
+          if (where) busyVenue.add(`${where}:${start}`);
+          firstLesson ??= p.id as string;
+          placed = true;
+          lessons += t.days.length;
         }
+        if (!placed)
+          await ok('post', '/timetable/periods', token, {
+            section_id: sec.id,
+            name: `${name} · Self study`,
+            start_time: start,
+            end_time: end,
+            kind: 'CUSTOM',
+          });
+        periods++;
+        li++;
       }
     }
-
-    // ---- the published timetable, then a draft that differs from it
-    const main = await ok('post', '/timetable/timetables', token, {
-      academic_year_id: year.id,
-      name: `Main timetable ${year.code}`,
-      effective_from: year.start_date,
-      notes: 'Demo timetable generated by the seed scheduler',
-    });
-    for (const [sectionId, list] of cells)
-      await ok('put', `/timetable/timetables/${main.id}/sections/${sectionId}/grid`, token, {
-        cells: list,
-      });
-    await ok('post', `/timetable/timetables/${main.id}/publish`, token, {});
-    const draft = await ok('post', `/timetable/timetables/${main.id}/duplicate`, token, {
-      name: `${year.code} revised timetable (draft)`,
-    });
-    const first = sections[0]!;
-    const firstCells = cells.get(first.id) ?? [];
-    if (firstCells.length > 1)
-      await ok('put', `/timetable/timetables/${draft.id}/sections/${first.id}/grid`, token, {
-        cells: [
-          {
-            ...firstCells[0],
-            subject_offering_id: null,
-            teacher_id: undefined,
-            venue_id: undefined,
-          },
-        ],
-      });
+    // one weekday exception: the last day of the week, the first lesson is free (e.g. sports)
+    if (firstLesson)
+      await ok(
+        'put',
+        `/timetable/periods/${firstLesson}/days/${t.days[t.days.length - 1]}`,
+        token,
+        {
+          subject_offering_id: null,
+        },
+      );
     created.push(
-      `timetable for ${t.name}: ${t.days.length}-day week, ${bell.length} periods, ${Object.keys(venue).length} venues, ` +
-        `${placed}/${lessonsWanted} lessons placed${missed ? ` (${missed} not schedulable: no available teacher or slot)` : ''} ` +
-        'in a published version plus one draft',
+      `timetable for ${t.name}: ${t.days.length}-day week, ${sections.length} sections, ${periods} periods, ` +
+        `${Object.keys(venue).length} venues, about ${lessons} lessons a week`,
     );
   }
 }

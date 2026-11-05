@@ -11,6 +11,7 @@ import {
   subjectOfferings,
   subjects,
 } from '../../db/schema/index.js';
+import { CLASS_PHASE, type ClassPhase } from '../../db/schema/enums.js';
 import type { Actor } from '../../platform/context.js';
 import { recordChange } from '../../platform/record.js';
 import { todayIso } from '../../shared/dates.js';
@@ -78,12 +79,21 @@ export const presentClass = (r: ClassRow) => ({
   updated_at: r.updatedAt.toISOString(),
 });
 
+/** Sorted unique phases, or null for "every phase" (nothing chosen, or all of them). */
+const normalizePhases = (p: readonly ClassPhase[] | null | undefined): ClassPhase[] | null => {
+  if (!p || !p.length) return null;
+  const set = CLASS_PHASE.filter((x) => p.includes(x));
+  return set.length === CLASS_PHASE.length ? null : set;
+};
+
 export const presentSubject = (r: SubjectRow) => ({
   id: r.id,
   code: r.code,
   name: r.name,
   description: r.description,
   subject_type: r.subjectType,
+  /** The class phases it is for; null = every phase. */
+  phases: normalizePhases(r.phases),
   status: r.status,
   version: r.version,
   created_at: r.createdAt.toISOString(),
@@ -522,7 +532,11 @@ export class AcademicService {
   ): Promise<number> {
     if (explicit !== undefined) return explicit;
     const rows = await tx
-      .select({ id: academicClasses.id, name: academicClasses.name, sequence: academicClasses.sequence })
+      .select({
+        id: academicClasses.id,
+        name: academicClasses.name,
+        sequence: academicClasses.sequence,
+      })
       .from(academicClasses)
       .where(and(eq(academicClasses.tenantId, tenantId), ne(academicClasses.status, 'ARCHIVED')))
       .orderBy(asc(academicClasses.sequence), asc(academicClasses.name));
@@ -538,17 +552,16 @@ export class AcademicService {
     for (const [i, r] of rows.entries()) {
       const want = i < pos ? i + 1 : i + 2;
       if (r.sequence !== want)
-        await tx.update(academicClasses).set({ sequence: want }).where(eq(academicClasses.id, r.id));
+        await tx
+          .update(academicClasses)
+          .set({ sequence: want })
+          .where(eq(academicClasses.id, r.id));
     }
     return pos + 1;
   }
 
   /** Saves a drag-and-drop order: the first id becomes 1, the next 2, and so on. */
-  async reorderClasses(
-    tenantId: string,
-    input: z.infer<typeof ReorderClassesBody>,
-    actor: Actor,
-  ) {
+  async reorderClasses(tenantId: string, input: z.infer<typeof ReorderClassesBody>, actor: Actor) {
     const ids = [...new Set(input.ids)];
     return this.db.transaction(async (tx) => {
       const rows = await tx
@@ -958,6 +971,14 @@ export class AcademicService {
     const conds: (SQL | undefined)[] = [eq(subjects.tenantId, tenantId)];
     if (q.status) conds.push(eq(subjects.status, q.status));
     if (q.subject_type) conds.push(eq(subjects.subjectType, q.subject_type));
+    if (q.phase)
+      conds.push(
+        or(
+          sql`${subjects.phases} is null`,
+          sql`json_length(${subjects.phases}) = 0`,
+          sql`json_contains(${subjects.phases}, json_quote(${q.phase}))`,
+        ),
+      );
     if (q.search) {
       const s = `%${q.search}%`;
       conds.push(or(like(subjects.name, s), like(subjects.code, s)));
@@ -1004,6 +1025,7 @@ export class AcademicService {
           name: input.name,
           description: input.description ?? null,
           subjectType: input.subject_type,
+          phases: normalizePhases(input.phases),
           createdBy: actor.userId,
         });
         const [row] = await tx
@@ -1041,6 +1063,7 @@ export class AcademicService {
           name: input.name ?? before.name,
           description: input.description === undefined ? before.description : input.description,
           subjectType: input.subject_type ?? before.subjectType,
+          phases: input.phases === undefined ? before.phases : normalizePhases(input.phases),
           version: before.version + 1,
         })
         .where(and(eq(subjects.id, id), eq(subjects.version, input.version)));
@@ -1178,6 +1201,13 @@ export class AcademicService {
         const klass = await this.getClassRow(tenantId, input.class_id, tx);
         if (klass.status !== 'ACTIVE')
           throw new BusinessRuleError('INVALID_STATE', 'The class is not active');
+        const phases = normalizePhases(subject.phases);
+        if (phases && klass.phase && !phases.includes(klass.phase))
+          throw new BusinessRuleError(
+            'OPERATION_NOT_ALLOWED',
+            `${subject.name} is not taught in this phase of school`,
+            { reason: 'SUBJECT_NOT_FOR_PHASE', subject_phases: phases, class_phase: klass.phase },
+          );
         if (input.section_id) {
           const section = await this.getSectionRow(tenantId, input.section_id, tx);
           if (section.academicYearId !== year.id || section.classId !== klass.id)

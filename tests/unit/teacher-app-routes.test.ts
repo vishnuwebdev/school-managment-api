@@ -5,9 +5,14 @@ import {
   teacherAppRoutes,
   type TeacherAppDeps,
 } from '../../src/modules/teacher-app/teacher-app.routes.js';
+import { teacherExamRoutes } from '../../src/modules/teacher-app/teacher-exams.routes.js';
+import type { TeacherExamService } from '../../src/modules/teacher-app/teacher-exams.service.js';
 
 // Route definitions only; handlers are not called.
-const routes = teacherAppRoutes({} as TeacherAppDeps);
+const routes = [
+  ...teacherAppRoutes({} as TeacherAppDeps),
+  ...teacherExamRoutes({} as TeacherExamService),
+];
 
 describe('teacher app routes', () => {
   it('all live under /teacher and need a school context', () => {
@@ -20,7 +25,11 @@ describe('teacher app routes', () => {
   it('all require teacher_app.use plus the permission of what they wrap', () => {
     for (const r of routes) {
       expect(r.permissions?.[0]).toBe('teacher_app.use');
-      expect(r.permissions!.length).toBeGreaterThan(1);
+      // The sign-in PIN and the password check are the teacher's own account
+      // settings and wrap no admin route.
+      if (r.path.startsWith('/teacher/pin') || r.path === '/teacher/verify-password')
+        expect(r.permissions).toEqual(['teacher_app.use']);
+      else expect(r.permissions!.length).toBeGreaterThan(1);
     }
   });
 

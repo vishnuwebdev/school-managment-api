@@ -7,6 +7,7 @@ import {
   TEACHER_LEAVING_STATUSES,
   teacherHistory,
   teachers,
+  users,
   type TeacherStatus,
 } from '../../db/schema/index.js';
 import type { Actor, Principal } from '../../platform/context.js';
@@ -21,6 +22,7 @@ import {
   ValidationError,
 } from '../../shared/errors.js';
 import { offsetOf, orderFrom, pageOf } from '../../shared/pagination.js';
+import type { AppPinService } from '../identity/app-pin.js';
 import type { MemberService } from '../members/members.service.js';
 import { likeOf, nextNumber } from '../students/support.js';
 import type { AssignmentService } from './assignments.service.js';
@@ -150,6 +152,7 @@ export class TeacherService {
     private readonly classTeachers: ClassTeacherService,
     private readonly lookups: StaffLookupService,
     private readonly calendar: CalendarService,
+    private readonly pins: AppPinService,
   ) {}
 
   private get db() {
@@ -164,7 +167,6 @@ export class TeacherService {
       teacherScope(principal, 'teachers.read'),
     ];
     if (q.status) conds.push(eq(teachers.status, q.status));
-    if (q.staff_type) conds.push(eq(teachers.staffType, q.staff_type));
     if (q.employment_type) conds.push(eq(teachers.employmentType, q.employment_type));
     if (q.department) conds.push(eq(teachers.department, q.department));
     if (q.has_login !== undefined)
@@ -198,7 +200,6 @@ export class TeacherService {
               first_name: teachers.firstName,
               teacher_number: teachers.teacherNumber,
               status: teachers.status,
-              staff_type: teachers.staffType,
               department: teachers.department,
               joining_date: teachers.joiningDate,
               created_at: teachers.createdAt,
@@ -258,14 +259,26 @@ export class TeacherService {
         email: null,
         roles: [] as { role_id: string; code: string; name: string }[],
         invitation: null,
+        password_set: false,
+        last_login_at: null,
+        app_pin: null,
       };
     const m = await this.members.get(tenantId, t.membershipId, ex);
+    const [[account], pin] = await Promise.all([
+      ex.select({ hash: users.passwordHash }).from(users).where(eq(users.id, m.user.id)),
+      this.pins.status(tenantId, m.id, ex),
+    ]);
     return {
       status: m.status,
       membership_id: m.id,
       email: m.user.email,
       roles: m.roles.map((r) => ({ role_id: r.role_id, code: r.code, name: r.name })),
       invitation: m.invitation,
+      /** The account has a password (it never says what it is). */
+      password_set: Boolean(account?.hash),
+      last_login_at: m.user.last_login_at ?? null,
+      /** Teacher app sign-in PIN: NONE, SET or LOCKED. */
+      app_pin: pin,
     };
   }
 
@@ -438,7 +451,6 @@ export class TeacherService {
         .values({
           tenantId,
           teacherNumber,
-          staffType: input.staff_type ?? 'TEACHING',
           status: input.status,
           firstName: input.first_name,
           middleName: input.middle_name ?? null,
@@ -488,7 +500,6 @@ export class TeacherService {
       after: presentTeacher(row!),
       payload: {
         teacher_number: row!.teacherNumber,
-        staff_type: row!.staffType,
         status: input.status,
       },
     });
@@ -540,7 +551,6 @@ export class TeacherService {
         ),
         reportingManagerId: pick(input.reporting_manager_id, before.reportingManagerId),
         teacherNumber: input.teacher_number ?? before.teacherNumber,
-        staffType: input.staff_type ?? before.staffType,
         firstName: input.first_name ?? before.firstName,
         middleName: pick(input.middle_name, before.middleName),
         lastName: input.last_name ?? before.lastName,
@@ -611,7 +621,12 @@ export class TeacherService {
     tenantId: string,
     id: string,
     command: TeacherCommand,
-    input: { reason?: string; effective_date?: string; exit_date?: string; leave_end_date?: string },
+    input: {
+      reason?: string;
+      effective_date?: string;
+      exit_date?: string;
+      leave_end_date?: string;
+    },
     principal: Principal,
     actor: Actor,
   ) {
@@ -661,8 +676,9 @@ export class TeacherService {
             { field: 'leave_end_date' },
           );
         // Weekly off days and school holidays are not counted as leave.
-        const days = (await this.calendar.workingDays(tenantId, effective, to, { kind: 'staff' }, tx))
-          .working_days;
+        const days = (
+          await this.calendar.workingDays(tenantId, effective, to, { kind: 'staff' }, tx)
+        ).working_days;
         if (days === 0)
           throw new BusinessRuleError(
             'OPERATION_NOT_ALLOWED',
@@ -815,6 +831,7 @@ export class TeacherService {
     const member = await this.members.invite(
       tenantId,
       {
+        password: input.password,
         email,
         firstName: t.preferredName ?? t.firstName,
         lastName: t.lastName,
@@ -841,8 +858,12 @@ export class TeacherService {
           .set({ membershipId: member.id, version: teacher.version + 1, updatedBy: actor.userId })
           .where(eq(teachers.id, id));
         await addTeacherHistory(tx, actor, tenantId, id, {
-          eventType: 'PORTAL_ACCESS_INVITED',
-          details: { membership_id: member.id, role_ids: [input.role_id] },
+          eventType: input.password ? 'PORTAL_ACCESS_GRANTED' : 'PORTAL_ACCESS_INVITED',
+          details: {
+            membership_id: member.id,
+            role_ids: [input.role_id],
+            method: input.password ? 'PASSWORD_SET_BY_ADMIN' : 'EMAIL_INVITATION',
+          },
         });
         await recordChange(tx, actor, tenantId, {
           action: 'TEACHER_PORTAL_ACCESS_INVITED',
@@ -870,6 +891,75 @@ export class TeacherService {
       throw err;
     }
     await refreshTeacherAccess(this.deps, tenantId);
+    return this.get(tenantId, id, principal);
+  }
+
+  /** The teacher's current login, or 422 when there is none to act on. */
+  private async loginOf(tenantId: string, id: string, principal: Principal) {
+    const t = await loadTeacher(this.db, tenantId, id, principal, 'teachers.portal.manage');
+    if (!t.membershipId)
+      throw new BusinessRuleError('INVALID_STATE', 'This teacher has no login. Give access first.');
+    const m = await this.members.get(tenantId, t.membershipId);
+    if (m.status === 'REVOKED')
+      throw new BusinessRuleError('INVALID_STATE', 'This teacher has no login. Give access first.');
+    return { teacher: t, membershipId: t.membershipId };
+  }
+
+  /**
+   * Set the teacher's sign-in password (teacher app and portal). A pending
+   * invitation is completed, the teacher is signed out everywhere and the app
+   * PIN is cleared, so the new password is needed on every device.
+   */
+  async setPortalPassword(
+    tenantId: string,
+    id: string,
+    password: string,
+    principal: Principal,
+    actor: Actor,
+  ) {
+    const { teacher, membershipId } = await this.loginOf(tenantId, id, principal);
+    if (TEACHER_LEAVING_STATUSES.includes(teacher.status))
+      throw new BusinessRuleError(
+        'OPERATION_NOT_ALLOWED',
+        'A password cannot be set for a teacher who has left',
+        { teacher_status: teacher.status },
+      );
+    const reason = 'Password set by the school';
+    await this.members.setPassword(tenantId, membershipId, password, reason, principal, actor);
+    await this.db.transaction((tx) =>
+      addTeacherHistory(tx, actor, tenantId, id, {
+        eventType: 'PORTAL_PASSWORD_SET',
+        reason,
+        details: { membership_id: membershipId },
+      }),
+    );
+    await refreshTeacherAccess(this.deps, tenantId);
+    return this.get(tenantId, id, principal);
+  }
+
+  /**
+   * Reset the teacher's app PIN (forgotten or locked). The PIN is deleted; the
+   * teacher signs in with the password and chooses a new one.
+   */
+  async resetAppPin(
+    tenantId: string,
+    id: string,
+    reason: string | undefined,
+    principal: Principal,
+    actor: Actor,
+  ) {
+    const { membershipId } = await this.loginOf(tenantId, id, principal);
+    const why = reason ?? 'PIN reset by the school';
+    await this.db.transaction(async (tx) => {
+      const removed = await this.pins.reset(tx, tenantId, membershipId, actor, why);
+      if (!removed)
+        throw new BusinessRuleError('INVALID_STATE', 'This teacher has no app PIN to reset');
+      await addTeacherHistory(tx, actor, tenantId, id, {
+        eventType: 'APP_PIN_RESET',
+        reason: why,
+        details: { membership_id: membershipId },
+      });
+    });
     return this.get(tenantId, id, principal);
   }
 
@@ -942,7 +1032,6 @@ export class TeacherService {
 
 const CSV_HEADERS = [
   'Teacher number',
-  'Staff type',
   'First name',
   'Middle name',
   'Last name',
@@ -982,7 +1071,6 @@ export async function exportTeachersCsv(
       lines.push(
         [
           t.teacher_number,
-          t.staff_type,
           t.first_name,
           t.middle_name,
           t.last_name,
@@ -1014,4 +1102,3 @@ export async function exportTeachersCsv(
   });
   return lines.join('\n') + '\n';
 }
-

@@ -84,13 +84,19 @@ const SCOPE_SUPPORT: Readonly<Record<string, Exclude<ScopeSupport, 'TENANT_WIDE'
   // Examinations (placementScope in the exams module: papers, marks and results are limited to the caller's classes and sections).
   'exams.read': 'PLACEMENT',
   'exams.marks.enter': 'PLACEMENT',
+  // Report-card remarks: a teacher writes them for the sections they are class teacher of.
+  'exams.remarks.write': 'PLACEMENT',
+  // Teacher app gate: the notices module itself limits a teacher to their own sections.
+  'communication.notices.post': 'NEUTRAL',
+  // Parent feedback inbox: school-wide gates (no section scope).
+  'feedback.read': 'NEUTRAL',
+  'feedback.respond': 'NEUTRAL',
+  'feedback.complaints': 'NEUTRAL',
 
-  // Own records: a teacher's own personnel record, own leave, a guardian's own children.
+  // Own records: a teacher's own personnel record, a guardian's own children.
   'teachers.read': 'OWN',
   // Gate for /teacher/* routes; the records they return follow the wrapped permission's scope.
   'teacher_app.use': 'NEUTRAL',
-  'leave.read': 'OWN',
-  'leave.request': 'OWN',
   'portal.access': 'OWN',
 };
 
@@ -187,20 +193,25 @@ export const PERMISSIONS: readonly PermissionDef[] = [
   t('academics.read', 'View academic structure', 'academics'),
   t('academics.manage', 'Manage years, terms, classes, sections and subjects', 'academics'),
 
-  // ---- Teachers & staff ----------------------------------------------------
-  t('teachers.read', 'View teachers and staff', 'teachers'),
-  t('teachers.create', 'Create teachers and staff', 'teachers'),
-  t('teachers.update', 'Edit teachers and staff', 'teachers'),
-  t('teachers.archive', 'Archive teachers and staff', 'teachers', true),
+  // ---- Teachers ------------------------------------------------------------
+  t('teachers.read', 'View teachers', 'teachers'),
+  t('teachers.create', 'Create teachers', 'teachers'),
+  t('teachers.update', 'Edit teachers', 'teachers'),
+  t('teachers.archive', 'Archive teachers', 'teachers', true),
   t('teachers.assignments.manage', 'Manage teaching assignments', 'teachers'),
-  t('teachers.reports.read', 'View staff reports', 'teachers'),
-  t('teachers.export', 'Export teachers and staff', 'teachers'),
-  t('teachers.documents.read', 'View staff documents', 'teachers'),
-  t('teachers.documents.manage', 'Upload / remove staff documents', 'teachers'),
-  t('teachers.attendance.read', 'View staff attendance', 'teachers.staff_attendance'),
-  t('teachers.attendance.mark', 'Mark staff attendance', 'teachers.staff_attendance'),
+  t('teachers.reports.read', 'View teacher reports', 'teachers'),
+  t('teachers.export', 'Export teachers', 'teachers'),
+  t('teachers.documents.read', 'View teacher documents', 'teachers'),
+  t('teachers.documents.manage', 'Upload / remove teacher documents', 'teachers'),
+  t('teachers.attendance.read', 'View teacher attendance', 'teachers.staff_attendance'),
+  t('teachers.attendance.mark', 'Mark teacher attendance', 'teachers.staff_attendance'),
   t('teachers.portal.manage', 'Invite / remove teacher portal access', 'teachers.portal', true),
   t('teacher_app.use', 'Use the teacher mobile app', 'teachers.mobile_app'),
+  t(
+    'teachers.notifications.manage',
+    'Send notifications to teachers (teacher app)',
+    'teachers.mobile_app',
+  ),
 
   // ---- Attendance ----------------------------------------------------------
   t('attendance.read', 'View attendance', 'attendance'),
@@ -221,6 +232,7 @@ export const PERMISSIONS: readonly PermissionDef[] = [
   t('exams.marks.enter', 'Enter marks', 'examinations'),
   t('exams.results.approve', 'Approve results', 'examinations'),
   t('exams.results.publish', 'Publish results', 'examinations', true),
+  t('exams.remarks.write', 'Write report-card remarks for parents', 'examinations'),
 
   // ---- Fees ----------------------------------------------------------------
   t('fees.read', 'View fees', 'fees'),
@@ -243,23 +255,23 @@ export const PERMISSIONS: readonly PermissionDef[] = [
     true,
   ),
 
-  // ---- Timetable & leave -----------------------------------------------------
+  // ---- Timetable -------------------------------------------------------------
   t('timetable.read', 'View timetable', 'timetable'),
   t('timetable.manage', 'Edit timetable', 'timetable'),
   t('timetable.publish', 'Publish and archive timetable versions', 'timetable'),
   t('timetable.export', 'Export timetables', 'timetable'),
-  t('leave.read', 'View leave', 'leave'),
-  t('leave.request', 'Request leave', 'leave'),
-  t('leave.approve', 'Approve leave', 'leave'),
-  t('leave.types.manage', 'Manage leave types', 'leave'),
 
   // ---- Communication ---------------------------------------------------------
   t('communication.read', 'View notices', 'communication'),
   t('communication.announcements.manage', 'Create and publish notices', 'communication'),
+  t('communication.notices.post', 'Post notices to own classes (teacher app)', 'communication'),
   t('communication.messages.send', 'Send bulk messages', 'communication'),
 
   // ---- Portal, library, transport, reports, integrations -------------------
   t('portal.access', 'Use the parent / guardian portal', 'parent_portal'),
+  t('feedback.read', 'View parent feedback and suggestions', 'parent_portal'),
+  t('feedback.respond', 'Reply to parent feedback and change its status', 'parent_portal'),
+  t('feedback.complaints', 'See and handle parent complaints (principal)', 'parent_portal'),
   t('library.read', 'View library', 'library'),
   t('library.manage', 'Manage library catalogue', 'library'),
   t('library.circulate', 'Issue and return books', 'library'),

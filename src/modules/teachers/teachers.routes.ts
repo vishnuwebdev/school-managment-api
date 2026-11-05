@@ -15,11 +15,15 @@ import {
   EndAssignmentBody,
   IdParams,
   PortalAccessBody,
+  PortalPasswordBody,
   QualificationBody,
   QualificationParams,
   Reason,
+  ResetPinBody,
   RevokePortalBody,
   SectionParams,
+  ClassParams,
+  ClassYearQuery,
   TeacherCommandBody,
   TeacherCommands,
   TeacherListQuery,
@@ -79,7 +83,7 @@ export function teacherRoutes(
       method: 'get',
       path: '/teachers',
       summary:
-        'List and search teachers and staff (filters: status, staff_type, department, employment_type, has_login)',
+        'List and search teachers (filters: status, department, employment_type, has_login)',
       tags: TAG,
       access: 'tenant',
       permissions: ['teachers.read'],
@@ -202,8 +206,9 @@ export function teacherRoutes(
       method: 'post',
       path: '/teachers/:id/portal-access',
       summary:
-        'Invite the teacher to sign in: creates an invitation through the members service and ' +
-        'links the membership. Anti-escalation applies to the chosen role.',
+        'Give the teacher a login and link it. Without `password` an invitation email is sent; ' +
+        'with `password` the login is active at once (no email). Anti-escalation applies to the ' +
+        'chosen role.',
       tags: TAG,
       access: 'tenant',
       permissions: ['teachers.portal.manage'],
@@ -231,6 +236,50 @@ export function teacherRoutes(
       body: RevokePortalBody,
       handler: async ({ params, body, req }) => ({
         data: await teachers.revokePortalAccess(
+          tid(req),
+          params.id,
+          body.reason,
+          me(req),
+          actorFrom(req.ctx),
+        ),
+      }),
+    }),
+
+    defineRoute({
+      method: 'put',
+      path: '/teachers/:id/portal-access/password',
+      summary:
+        "Set the teacher's sign-in password (teacher app). Completes a pending invitation, signs " +
+        'the teacher out everywhere and clears the app PIN. Refused when the email also signs in ' +
+        'to another school.',
+      tags: TAG,
+      access: 'tenant',
+      permissions: ['teachers.portal.manage'],
+      params: IdParams,
+      body: PortalPasswordBody,
+      handler: async ({ params, body, req }) => ({
+        data: await teachers.setPortalPassword(
+          tid(req),
+          params.id,
+          body.password,
+          me(req),
+          actorFrom(req.ctx),
+        ),
+      }),
+    }),
+    defineRoute({
+      method: 'delete',
+      path: '/teachers/:id/portal-access/pin',
+      summary:
+        "Reset the teacher's app PIN (forgotten or locked). The teacher signs in with the password " +
+        'and chooses a new PIN.',
+      tags: TAG,
+      access: 'tenant',
+      permissions: ['teachers.portal.manage'],
+      params: IdParams,
+      body: ResetPinBody,
+      handler: async ({ params, body, req }) => ({
+        data: await teachers.resetAppPin(
           tid(req),
           params.id,
           body.reason,
@@ -448,6 +497,51 @@ export function teacherRoutes(
         await classTeachers.remove(
           tid(req),
           params.sectionId,
+          body.reason,
+          me(req),
+          actorFrom(req.ctx),
+        );
+      },
+    }),
+    defineRoute({
+      method: 'put',
+      path: '/academic-classes/:classId/class-teacher',
+      summary:
+        'Make a teacher the class teacher of a whole class that has no sections in the year ' +
+        '(academic_year_id, default: the active year); the previous one is ended. 422 CLASS_HAS_SECTIONS',
+      tags: TAG_C,
+      access: 'tenant',
+      permissions: ['teachers.assignments.manage'],
+      params: ClassParams,
+      query: ClassYearQuery,
+      body: AssignClassTeacherBody,
+      handler: async ({ params, query, body, req }) => ({
+        data: await classTeachers.assignClass(
+          tid(req),
+          params.classId,
+          query.academic_year_id,
+          body,
+          me(req),
+          actorFrom(req.ctx),
+        ),
+      }),
+    }),
+    defineRoute({
+      method: 'delete',
+      path: '/academic-classes/:classId/class-teacher',
+      summary: 'End the class teacher of a whole class (reason required, kept in history)',
+      tags: TAG_C,
+      access: 'tenant',
+      permissions: ['teachers.assignments.manage'],
+      params: ClassParams,
+      query: ClassYearQuery,
+      body: Reason,
+      status: 204,
+      handler: async ({ params, query, body, req }) => {
+        await classTeachers.removeClass(
+          tid(req),
+          params.classId,
+          query.academic_year_id,
           body.reason,
           me(req),
           actorFrom(req.ctx),

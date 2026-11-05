@@ -1,7 +1,7 @@
 import { and, eq, sql } from 'drizzle-orm';
 import type { Executor } from '../../db/client.js';
 import { academicSections, timetableEntries, timetablePeriods } from '../../db/schema/index.js';
-import { periodsForSection } from './support.js';
+import { ownerKey, ownerTitle, periodsForSection } from './support.js';
 import {
   DAY_NAMES,
   fetchEntries,
@@ -111,7 +111,7 @@ export async function runCheck(
     [
       'SECTION_CLASH',
       'has two lessons at once',
-      (r) => `${r.e.sectionId}:${r.e.dayOfWeek}:${r.e.periodId}`,
+      (r) => `${ownerKey(r.e)}:${r.e.dayOfWeek}:${r.e.periodId}`,
     ],
     [
       'VENUE_CLASH',
@@ -126,7 +126,7 @@ export async function runCheck(
         type === 'TEACHER_CLASH'
           ? `${first.t.firstName} ${first.t.lastName}`
           : type === 'SECTION_CLASH'
-            ? `${first.c.name} ${first.s.name}`
+            ? ownerTitle(first)
             : (first.v?.name ?? 'Venue');
       block({
         type,
@@ -147,6 +147,15 @@ export async function runCheck(
         group by en.section_id`,
   ))
     roster.set(r.section_id, Number(r.n));
+  // Students of a class without sections, for class-level lessons.
+  for (const r of await rows<{ class_id: string; n: string | number }>(
+    ex,
+    sql`select en.class_id, count(*) as n from enrollments en
+        where en.tenant_id = ${tenantId} and en.academic_year_id = ${tt.academicYearId}
+          and en.status in ('PENDING', 'ACTIVE') and en.section_id is null
+        group by en.class_id`,
+  ))
+    roster.set(`C${r.class_id}`, Number(r.n));
   for (const r of all) {
     const at = { day_of_week: r.e.dayOfWeek, period_id: r.e.periodId, entries: [v(r)] };
     if (r.a.status !== 'ACTIVE')
@@ -167,10 +176,13 @@ export async function runCheck(
       });
     if (r.o.status !== 'ACTIVE')
       block({ type: 'OFFERING_INACTIVE', message: `${r.sub.name} is no longer offered`, ...at });
-    if (r.o.classId !== r.s.classId || (r.o.sectionId !== null && r.o.sectionId !== r.s.id))
+    if (
+      r.o.classId !== r.e.classId ||
+      (r.o.sectionId !== null && r.o.sectionId !== (r.s?.id ?? null))
+    )
       block({
         type: 'OFFERING_NOT_FOR_SECTION',
-        message: `${r.sub.name} is not offered to ${r.c.name} ${r.s.name}`,
+        message: `${r.sub.name} is not offered to ${ownerTitle(r)}`,
         ...at,
       });
     if (r.p.status !== 'ACTIVE')
@@ -185,18 +197,18 @@ export async function runCheck(
       });
     if (r.v && r.v.status !== 'ACTIVE')
       block({ type: 'VENUE_INACTIVE', message: `${r.v.name} is inactive`, ...at });
-    if (r.s.status !== 'ACTIVE' && r.s.status !== 'DRAFT')
+    if (r.s && r.s.status !== 'ACTIVE' && r.s.status !== 'DRAFT')
       block({
         type: 'SECTION_NOT_SCHEDULABLE',
-        message: `${r.c.name} ${r.s.name} is ${r.s.status.toLowerCase()}`,
+        message: `${ownerTitle(r)} is ${r.s.status.toLowerCase()}`,
         ...at,
       });
     if (r.v?.capacity != null) {
-      const n = roster.get(r.e.sectionId) ?? 0;
+      const n = roster.get(ownerKey(r.e)) ?? 0;
       if (n > r.v.capacity)
         warn({
           type: 'VENUE_CAPACITY',
-          message: `${r.v.name} seats ${r.v.capacity} but ${r.c.name} ${r.s.name} has ${n} students`,
+          message: `${r.v.name} seats ${r.v.capacity} but ${ownerTitle(r)} has ${n} students`,
           ...at,
           details: { capacity: r.v.capacity, students: n },
         });
@@ -209,7 +221,7 @@ export async function runCheck(
     .from(timetablePeriods)
     .where(and(eq(timetablePeriods.tenantId, tenantId), eq(timetablePeriods.status, 'ACTIVE')));
   const perSection = new Map<string, number>();
-  for (const r of all) perSection.set(r.e.sectionId, (perSection.get(r.e.sectionId) ?? 0) + 1);
+  for (const r of all) perSection.set(ownerKey(r.e), (perSection.get(ownerKey(r.e)) ?? 0) + 1);
   const sections = await ex
     .select({
       id: academicSections.id,
@@ -246,6 +258,22 @@ export async function runCheck(
         type: 'EMPTY_SLOTS',
         message: `Section ${s.name} has ${capacity - n} empty lesson slot(s)`,
         details: { section_id: s.id, empty_slots: capacity - n, lesson_slots: capacity },
+      });
+  }
+  // Classes without sections that have class-level lessons: report their empty slots
+  // too. A class with no lessons at all is not flagged (it may not use the timetable).
+  const classOwners = new Map<string, EntryJoined>();
+  for (const r of all) if (!r.s) classOwners.set(r.e.classId, r);
+  for (const [classId, r] of classOwners) {
+    const capacity =
+      periodsForSection(activePeriods, { id: '', classId }).filter((p) => p.kind === 'LESSON')
+        .length * settings.workingDays.length;
+    const n = perSection.get(`C${classId}`) ?? 0;
+    if (n < capacity)
+      completeness({
+        type: 'EMPTY_SLOTS',
+        message: `${r.c.name} has ${capacity - n} empty lesson slot(s)`,
+        details: { class_id: classId, empty_slots: capacity - n, lesson_slots: capacity },
       });
   }
   return {

@@ -1,4 +1,4 @@
-import { and, desc, eq, gt, inArray, isNull, ne } from 'drizzle-orm';
+import { and, desc, eq, gt, inArray, isNotNull, isNull, ne, sql } from 'drizzle-orm';
 import type { Deps } from '../../container.js';
 import type { Executor } from '../../db/client.js';
 import {
@@ -22,9 +22,12 @@ import {
   BusinessRuleError,
   ConflictError,
   NotFoundError,
+  ValidationError,
 } from '../../shared/errors.js';
+import { parsePhone } from '../../shared/phone.js';
 import { addDays, addMinutes } from '../../shared/time.js';
 import type { AuthorizationService } from '../access/authorization.service.js';
+import type { AppPinService } from './app-pin.js';
 import { dummyVerify, hashPassword, verifyPassword } from './password.js';
 import { sessionEnded } from './session-end.js';
 import type { TokenService } from './tokens.js';
@@ -54,6 +57,7 @@ export class AuthService {
     private readonly deps: Deps,
     private readonly tokens: TokenService,
     private readonly authz: AuthorizationService,
+    private readonly pins: AppPinService,
   ) {}
 
   private anonymous(meta: RequestMeta, tenantId: string | null = null): Actor {
@@ -65,12 +69,24 @@ export class AuthService {
   // ---------------------------------------------------------------------------
 
   async login(
-    input: { email: string; password: string; membershipId?: string; device?: DeviceInfo },
+    input: {
+      email?: string;
+      phone?: string;
+      password: string;
+      membershipId?: string;
+      device?: DeviceInfo;
+    },
     meta: RequestMeta,
   ) {
     const now = this.deps.clock.now();
-    const email = input.email.trim().toLowerCase();
-    const [user] = await this.deps.db.select().from(users).where(eq(users.email, email));
+    const byPhone = !input.email && !!input.phone;
+    const badCredentials = byPhone
+      ? 'Mobile number or password is incorrect'
+      : 'Email or password is incorrect';
+    const email = input.email?.trim().toLowerCase();
+    const user = email
+      ? (await this.deps.db.select().from(users).where(eq(users.email, email)))[0]
+      : await this.userByPhone(input.phone ?? '');
 
     if (!user || !user.passwordHash) {
       await dummyVerify(input.password);
@@ -78,9 +94,11 @@ export class AuthService {
         action: 'LOGIN_FAILED',
         entityType: 'user',
         entityId: user?.id ?? null,
-        after: { email, reason: 'UNKNOWN_USER' },
+        after: email
+          ? { email, reason: 'UNKNOWN_USER' }
+          : { phone: input.phone, reason: 'UNKNOWN_USER' },
       });
-      throw new AuthenticationError('INVALID_CREDENTIALS', 'Email or password is incorrect');
+      throw new AuthenticationError('INVALID_CREDENTIALS', badCredentials);
     }
     if (user.lockedUntil && user.lockedUntil > now) {
       throw new AuthorizationError('ACCOUNT_LOCKED', 'Too many failed attempts. Try again later.', {
@@ -107,7 +125,7 @@ export class AuthService {
         entityId: user.id,
         after: { reason: 'BAD_PASSWORD' },
       });
-      throw new AuthenticationError('INVALID_CREDENTIALS', 'Email or password is incorrect');
+      throw new AuthenticationError('INVALID_CREDENTIALS', badCredentials);
     }
     if (user.status !== 'ACTIVE')
       throw new AuthorizationError('ACCOUNT_DISABLED', 'This account is not active');
@@ -161,6 +179,80 @@ export class AuthService {
       return tokens;
     });
     return { ...issued, membership: chosen! };
+  }
+
+  /**
+   * Mobile-app PIN sign-in: the device token saved when the PIN was set, plus
+   * the PIN. Signs in to the school the PIN belongs to, as long as the account
+   * and the school login are still active.
+   */
+  /**
+   * The account a mobile number signs in to (parent app). With the country code the match is
+   * exact; without it ("98765 43210", "082 123 4567") the number must end one login's stored
+   * number, and when two schools' parents share the national number the app must send the
+   * country code.
+   */
+  private async userByPhone(raw: string) {
+    const p = parsePhone(raw);
+    if (!p) return undefined;
+    if ('full' in p)
+      return (await this.deps.db.select().from(users).where(eq(users.loginPhone, p.full)))[0];
+    const found = await this.deps.db
+      .select()
+      .from(users)
+      .where(
+        and(
+          isNotNull(users.loginPhone),
+          sql`right(${users.loginPhone}, ${p.national.length}) = ${p.national}`,
+        ),
+      )
+      .limit(2);
+    if (found.length > 1)
+      throw new ValidationError('Add your country code to the mobile number (for example +91)', {
+        location: 'body',
+        issues: [{ path: 'phone', message: 'Add your country code, for example +91' }],
+      });
+    return found[0];
+  }
+
+  async loginWithPin(
+    input: { pinToken: string; pin: string; device?: DeviceInfo },
+    meta: RequestMeta,
+  ) {
+    const pin = await this.pins.verify(input.pinToken, input.pin);
+    const [user] = await this.deps.db.select().from(users).where(eq(users.id, pin.userId));
+    if (!user || user.status !== 'ACTIVE')
+      throw new AuthorizationError('ACCOUNT_DISABLED', 'This account is not active');
+    const chosen = (await this.membershipOptions(user.id)).find(
+      (o) => o.membership_id === pin.membershipId,
+    );
+    if (!chosen)
+      throw new AuthorizationError('TENANT_ACCESS_DENIED', 'You do not have access to this school');
+
+    const device = {
+      deviceName: input.device?.deviceName ?? pin.device.deviceName,
+      deviceType: input.device?.deviceType ?? pin.device.deviceType,
+    };
+    const issued = await this.deps.db.transaction(async (tx) => {
+      const tokens = await this.createSession(tx, user.id, chosen.membership_id, device, meta);
+      await this.pins.markUsed(tx, pin.pinId);
+      await tx
+        .update(users)
+        .set({ lastLoginAt: this.deps.clock.now() })
+        .where(eq(users.id, user.id));
+      await recordAudit(
+        tx,
+        { userId: user.id, actorType: 'USER', tenantId: pin.tenantId, meta },
+        {
+          action: 'LOGIN_SUCCESS',
+          entityType: 'session',
+          entityId: tokens.session_id,
+          after: { method: 'PIN' },
+        },
+      );
+      return tokens;
+    });
+    return { ...issued, membership: chosen };
   }
 
   /** Active memberships a user can sign in to (archived schools are excluded). */

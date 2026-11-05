@@ -8,7 +8,11 @@ import {
   academicSections,
   academicYears,
   enrollments,
+  examClasses,
   examMarks,
+  examPaperSections,
+  examPaperSittings,
+  examPaperStaff,
   examPapers,
   exams,
   students,
@@ -50,7 +54,8 @@ export const GRADE_SCALE = [
 export const gradeOf = (pct: number) =>
   (GRADE_SCALE.find((g) => pct >= g.min) ?? GRADE_SCALE[GRADE_SCALE.length - 1]!).grade;
 
-const num = (v: string | number | null | undefined) => (v === null || v === undefined ? null : Number(v));
+const num = (v: string | number | null | undefined) =>
+  v === null || v === undefined ? null : Number(v);
 const round = (n: number, d = 1) => Math.round(n * 10 ** d) / 10 ** d;
 const fullName = (s: { firstName: string; lastName: string }) => `${s.firstName} ${s.lastName}`;
 
@@ -82,6 +87,24 @@ export class ExamService {
     return { paper, exam };
   }
 
+  /** Remove what the exam timetable keeps for some papers (before deleting them). */
+  private async dropTimetable(tx: Executor, tenantId: string, paperIds: string[]) {
+    if (!paperIds.length) return;
+    await tx
+      .delete(examPaperStaff)
+      .where(and(eq(examPaperStaff.tenantId, tenantId), inArray(examPaperStaff.paperId, paperIds)));
+    await tx
+      .delete(examPaperSittings)
+      .where(
+        and(eq(examPaperSittings.tenantId, tenantId), inArray(examPaperSittings.paperId, paperIds)),
+      );
+    await tx
+      .delete(examPaperSections)
+      .where(
+        and(eq(examPaperSections.tenantId, tenantId), inArray(examPaperSections.paperId, paperIds)),
+      );
+  }
+
   private assertOpen(exam: Exam) {
     if (exam.status === 'PUBLISHED')
       throw new BusinessRuleError(
@@ -91,8 +114,17 @@ export class ExamService {
       );
   }
 
-  /** Active students of a class in the exam's year (optionally narrowed to some classes). */
-  private async roster(tenantId: string, yearId: string, classId: string, ex: Executor = this.db) {
+  /**
+   * Active students of a class in the exam's year. A teacher's own test (exam.section_id)
+   * is sat by one section only, so pass that section to narrow the list.
+   */
+  private async roster(
+    tenantId: string,
+    yearId: string,
+    classId: string,
+    ex: Executor = this.db,
+    sectionId: string | null = null,
+  ) {
     return ex
       .select({
         studentId: students.id,
@@ -121,12 +153,17 @@ export class ExamService {
           eq(enrollments.academicYearId, yearId),
           eq(enrollments.classId, classId),
           eq(enrollments.status, 'ACTIVE'),
+          ...(sectionId ? [eq(enrollments.sectionId, sectionId)] : []),
         ),
       )
       .orderBy(asc(academicSections.name), asc(students.firstName), asc(students.lastName));
   }
 
-  /** Create a paper for every subject the class studies that year (existing papers are kept). */
+  /**
+   * Put the classes in the exam and create a paper for every subject each class
+   * studies that year (existing papers are kept). A class with no subjects offered
+   * still joins the exam with no papers, so its papers can be added by hand.
+   */
   private async addPapersForClasses(
     tx: Executor,
     tenantId: string,
@@ -140,6 +177,7 @@ export class ExamService {
       .from(academicClasses)
       .where(and(eq(academicClasses.tenantId, tenantId), inArray(academicClasses.id, classIds)));
     if (classes.length !== new Set(classIds).size) throw new NotFoundError('Class');
+    await this.joinClasses(tx, tenantId, exam.id, [...new Set(classIds)]);
     const offered = await tx
       .select({ classId: subjectOfferings.classId, subjectId: subjectOfferings.subjectId })
       .from(subjectOfferings)
@@ -176,13 +214,42 @@ export class ExamService {
     return values.length;
   }
 
+  /** Record that these classes sit the exam (already joined classes are left alone). */
+  private async joinClasses(tx: Executor, tenantId: string, examId: string, classIds: string[]) {
+    if (!classIds.length) return;
+    await tx
+      .insert(examClasses)
+      .values(classIds.map((classId) => ({ id: uuidv7(), tenantId, examId, classId })))
+      .onDuplicateKeyUpdate({ set: { examId: sql`${examClasses.examId}` } });
+  }
+
+  /** The classes that sit each exam (joined classes plus any class that has a paper). */
+  private async examClassIds(tenantId: string, examIds: string[], ex: Executor = this.db) {
+    const out = new Map<string, Set<string>>();
+    for (const id of examIds) out.set(id, new Set());
+    if (!examIds.length) return out;
+    const [joined, withPapers] = await Promise.all([
+      ex
+        .select({ examId: examClasses.examId, classId: examClasses.classId })
+        .from(examClasses)
+        .where(and(eq(examClasses.tenantId, tenantId), inArray(examClasses.examId, examIds))),
+      ex
+        .selectDistinct({ examId: examPapers.examId, classId: examPapers.classId })
+        .from(examPapers)
+        .where(and(eq(examPapers.tenantId, tenantId), inArray(examPapers.examId, examIds))),
+    ]);
+    for (const r of [...joined, ...withPapers]) out.get(r.examId)?.add(r.classId);
+    return out;
+  }
+
   /** Counts per exam: classes, papers, marks expected and marks entered. */
   private async stats(tenantId: string, list: Exam[]) {
     const out = new Map<
       string,
       { classes: number; papers: number; expected: number; entered: number; scheduled: number }
     >();
-    for (const e of list) out.set(e.id, { classes: 0, papers: 0, expected: 0, entered: 0, scheduled: 0 });
+    for (const e of list)
+      out.set(e.id, { classes: 0, papers: 0, expected: 0, entered: 0, scheduled: 0 });
     if (!list.length) return out;
     const ids = list.map((e) => e.id);
     const papers = await this.db
@@ -206,6 +273,23 @@ export class ExamService {
       )
       .groupBy(enrollments.academicYearId, enrollments.classId);
     const rosterSize = new Map(rosterRows.map((r) => [`${r.yearId}:${r.classId}`, Number(r.n)]));
+    // A teacher's own test is sat by one section: count that section's students instead.
+    const testSections = [...new Set(list.map((e) => e.sectionId).filter((x): x is string => !!x))];
+    const sectionRows = testSections.length
+      ? await this.db
+          .select({ sectionId: enrollments.sectionId, n: sql<number>`count(*)` })
+          .from(enrollments)
+          .where(
+            and(
+              eq(enrollments.tenantId, tenantId),
+              eq(enrollments.status, 'ACTIVE'),
+              inArray(enrollments.sectionId, testSections),
+            ),
+          )
+          .groupBy(enrollments.sectionId)
+      : [];
+    const sectionSize = new Map(sectionRows.map((r) => [String(r.sectionId), Number(r.n)]));
+    const examSection = new Map(list.map((e) => [e.id, e.sectionId]));
     const entered = papers.length
       ? await this.db
           .select({ paperId: examMarks.paperId, n: sql<number>`count(*)` })
@@ -224,17 +308,18 @@ export class ExamService {
       : [];
     const enteredBy = new Map(entered.map((r) => [r.paperId, Number(r.n)]));
     const examYear = new Map(list.map((e) => [e.id, e.academicYearId]));
-    const classSets = new Map<string, Set<string>>();
     for (const p of papers) {
       const s = out.get(p.examId)!;
       s.papers++;
       if (p.examDate) s.scheduled++;
-      s.expected += rosterSize.get(`${examYear.get(p.examId)}:${p.classId}`) ?? 0;
+      const sec = examSection.get(p.examId);
+      s.expected += sec
+        ? (sectionSize.get(sec) ?? 0)
+        : (rosterSize.get(`${examYear.get(p.examId)}:${p.classId}`) ?? 0);
       s.entered += enteredBy.get(p.id) ?? 0;
-      if (!classSets.has(p.examId)) classSets.set(p.examId, new Set());
-      classSets.get(p.examId)!.add(p.classId);
     }
-    for (const [id, set] of classSets) out.get(id)!.classes = set.size;
+    const sitting = await this.examClassIds(tenantId, ids);
+    for (const [id, set] of sitting) out.get(id)!.classes = set.size;
     return out;
   }
 
@@ -261,6 +346,10 @@ export class ExamService {
       end_date: e.endDate,
       status: e.status,
       stage: this.stage(e, s),
+      /** Set for a teacher's own test (one section, created in the teacher app). */
+      section_id: e.sectionId,
+      teacher_id: e.teacherId,
+      by_teacher: e.teacherId !== null,
       published_at: e.publishedAt,
       version: e.version,
       classes: s.classes,
@@ -290,8 +379,15 @@ export class ExamService {
       .select()
       .from(exams)
       .where(and(...conds))
-      .orderBy(sql`${exams.startDate} is null`, sql`${exams.startDate} desc`, sql`${exams.createdAt} desc`);
-    const [stats, years] = await Promise.all([this.stats(tenantId, rows), this.yearNames(tenantId)]);
+      .orderBy(
+        sql`${exams.startDate} is null`,
+        sql`${exams.startDate} desc`,
+        sql`${exams.createdAt} desc`,
+      );
+    const [stats, years] = await Promise.all([
+      this.stats(tenantId, rows),
+      this.yearNames(tenantId),
+    ]);
     return rows.map((e) => this.present(e, years.get(e.academicYearId), stats.get(e.id)!));
   }
 
@@ -316,10 +412,13 @@ export class ExamService {
         .where(eq(academicClasses.tenantId, tenantId)),
     ]);
     const classMap = new Map(classRows.map((c) => [c.id, c]));
-    const classIds = [...new Set(papers.map((p) => p.classId))];
+    const classIds = [...((await this.examClassIds(tenantId, [id])).get(id) ?? [])];
     const rosters = new Map<string, number>();
     for (const cid of classIds)
-      rosters.set(cid, (await this.roster(tenantId, exam.academicYearId, cid)).length);
+      rosters.set(
+        cid,
+        (await this.roster(tenantId, exam.academicYearId, cid, this.db, exam.sectionId)).length,
+      );
     const entered = papers.length
       ? await this.db
           .select({ paperId: examMarks.paperId, n: sql<number>`count(*)` })
@@ -376,10 +475,17 @@ export class ExamService {
         .select({ id: exams.id })
         .from(exams)
         .where(
-          and(eq(exams.tenantId, tenantId), eq(exams.academicYearId, y.id), eq(exams.name, input.name)),
+          and(
+            eq(exams.tenantId, tenantId),
+            eq(exams.academicYearId, y.id),
+            eq(exams.name, input.name),
+          ),
         );
       if (dup)
-        throw new ConflictError('DUPLICATE_RESOURCE', 'An exam with this name already exists this year');
+        throw new ConflictError(
+          'DUPLICATE_RESOURCE',
+          'An exam with this name already exists this year',
+        );
       const newId = uuidv7();
       await tx.insert(exams).values({
         id: newId,
@@ -466,6 +572,7 @@ export class ExamService {
         .where(and(eq(examPapers.tenantId, tenantId), eq(examPapers.examId, id)));
       if (papers.length) {
         const ids = papers.map((p) => p.id);
+        await this.dropTimetable(tx, tenantId, ids);
         await tx
           .delete(examMarks)
           .where(and(eq(examMarks.tenantId, tenantId), inArray(examMarks.paperId, ids)));
@@ -473,6 +580,9 @@ export class ExamService {
           .delete(examPapers)
           .where(and(eq(examPapers.tenantId, tenantId), eq(examPapers.examId, id)));
       }
+      await tx
+        .delete(examClasses)
+        .where(and(eq(examClasses.tenantId, tenantId), eq(examClasses.examId, id)));
       await tx.delete(exams).where(and(eq(exams.tenantId, tenantId), eq(exams.id, id)));
       await recordChange(tx, actor, tenantId, {
         action: 'EXAM_DELETED',
@@ -483,7 +593,12 @@ export class ExamService {
     });
   }
 
-  async addClasses(tenantId: string, id: string, input: z.infer<typeof AddClassesBody>, actor: Actor) {
+  async addClasses(
+    tenantId: string,
+    id: string,
+    input: z.infer<typeof AddClassesBody>,
+    actor: Actor,
+  ) {
     await this.db.transaction(async (tx) => {
       const exam = await this.loadExam(tenantId, id, tx);
       this.assertOpen(exam);
@@ -521,6 +636,7 @@ export class ExamService {
         );
       if (papers.length) {
         const ids = papers.map((p) => p.id);
+        await this.dropTimetable(tx, tenantId, ids);
         await tx
           .delete(examMarks)
           .where(and(eq(examMarks.tenantId, tenantId), inArray(examMarks.paperId, ids)));
@@ -528,6 +644,15 @@ export class ExamService {
           .delete(examPapers)
           .where(and(eq(examPapers.tenantId, tenantId), inArray(examPapers.id, ids)));
       }
+      await tx
+        .delete(examClasses)
+        .where(
+          and(
+            eq(examClasses.tenantId, tenantId),
+            eq(examClasses.examId, id),
+            eq(examClasses.classId, classId),
+          ),
+        );
       await recordChange(tx, actor, tenantId, {
         action: 'EXAM_CLASS_REMOVED',
         entityType: 'exam',
@@ -564,7 +689,12 @@ export class ExamService {
         ),
       )
       .where(and(...conds))
-      .orderBy(asc(academicClasses.sequence), sql`${examPapers.examDate} is null`, asc(examPapers.examDate), asc(subjects.name));
+      .orderBy(
+        asc(academicClasses.sequence),
+        sql`${examPapers.examDate} is null`,
+        asc(examPapers.examDate),
+        asc(subjects.name),
+      );
     const ids = rows.map((r) => r.paper.id);
     const entered = ids.length
       ? await this.db
@@ -582,7 +712,10 @@ export class ExamService {
     const enteredBy = new Map(entered.map((r) => [r.paperId, Number(r.n)]));
     const rosterSizes = new Map<string, number>();
     for (const cid of new Set(rows.map((r) => r.paper.classId)))
-      rosterSizes.set(cid, (await this.roster(tenantId, exam.academicYearId, cid)).length);
+      rosterSizes.set(
+        cid,
+        (await this.roster(tenantId, exam.academicYearId, cid, this.db, exam.sectionId)).length,
+      );
     return rows.map((r) => ({
       id: r.paper.id,
       exam_id: exam.id,
@@ -592,6 +725,8 @@ export class ExamService {
       subject_name: r.subjectName,
       subject_code: r.subjectCode,
       exam_date: r.paper.examDate,
+      start_time: r.paper.startTime ? r.paper.startTime.slice(0, 5) : null,
+      end_time: r.paper.endTime ? r.paper.endTime.slice(0, 5) : null,
       max_marks: num(r.paper.maxMarks)!,
       pass_marks: num(r.paper.passMarks)!,
       students: rosterSizes.get(r.paper.classId) ?? 0,
@@ -604,7 +739,12 @@ export class ExamService {
     return this.paperRows(tenantId, exam, classId);
   }
 
-  async createPaper(tenantId: string, id: string, input: z.infer<typeof CreatePaperBody>, actor: Actor) {
+  async createPaper(
+    tenantId: string,
+    id: string,
+    input: z.infer<typeof CreatePaperBody>,
+    actor: Actor,
+  ) {
     if (input.pass_marks > input.max_marks)
       throw new ValidationError('Pass marks cannot be more than the maximum');
     const paperId = await this.db.transaction(async (tx) => {
@@ -621,7 +761,12 @@ export class ExamService {
             eq(examPapers.subjectId, input.subject_id),
           ),
         );
-      if (dup) throw new ConflictError('DUPLICATE_RESOURCE', 'This subject already has a paper in this class');
+      if (dup)
+        throw new ConflictError(
+          'DUPLICATE_RESOURCE',
+          'This subject already has a paper in this class',
+        );
+      await this.joinClasses(tx, tenantId, id, [input.class_id]);
       const newId = uuidv7();
       await tx.insert(examPapers).values({
         id: newId,
@@ -645,7 +790,12 @@ export class ExamService {
     return (await this.paperRows(tenantId, exam)).find((p) => p.id === paperId)!;
   }
 
-  async updatePaper(tenantId: string, paperId: string, input: z.infer<typeof UpdatePaperBody>, actor: Actor) {
+  async updatePaper(
+    tenantId: string,
+    paperId: string,
+    input: z.infer<typeof UpdatePaperBody>,
+    actor: Actor,
+  ) {
     const { paper, exam } = await this.loadPaper(tenantId, paperId);
     this.assertOpen(exam);
     const max = input.max_marks ?? num(paper.maxMarks)!;
@@ -692,6 +842,7 @@ export class ExamService {
     const { exam } = await this.loadPaper(tenantId, paperId);
     this.assertOpen(exam);
     await this.db.transaction(async (tx) => {
+      await this.dropTimetable(tx, tenantId, [paperId]);
       await tx
         .delete(examMarks)
         .where(and(eq(examMarks.tenantId, tenantId), eq(examMarks.paperId, paperId)));
@@ -711,7 +862,7 @@ export class ExamService {
   async getMarks(tenantId: string, paperId: string) {
     const { paper, exam } = await this.loadPaper(tenantId, paperId);
     const [roster, marks, subject, klass] = await Promise.all([
-      this.roster(tenantId, exam.academicYearId, paper.classId),
+      this.roster(tenantId, exam.academicYearId, paper.classId, this.db, exam.sectionId),
       this.db
         .select()
         .from(examMarks)
@@ -726,7 +877,22 @@ export class ExamService {
         .where(and(eq(academicClasses.tenantId, tenantId), eq(academicClasses.id, paper.classId))),
     ]);
     const byStudent = new Map(marks.map((m) => [m.studentId, m]));
+    const status = await this.sectionStatus(tenantId, paperId);
+    const sectionIds = [...new Set(roster.map((s) => s.sectionId).filter((x): x is string => !!x))];
     return {
+      /** Hand-in state per section: SUBMITTED once the teacher has handed the marks in. */
+      sections: sectionIds.map((id) => {
+        const st = status.get(id);
+        const name = roster.find((r) => r.sectionId === id)?.sectionName ?? null;
+        return {
+          section_id: id,
+          section_name: name,
+          status: st?.status ?? 'DRAFT',
+          submitted_at: st?.submittedAt?.toISOString() ?? null,
+          returned_at: st?.returnedAt?.toISOString() ?? null,
+          return_note: st?.returnNote ?? null,
+        };
+      }),
       paper: {
         id: paper.id,
         exam_id: exam.id,
@@ -745,6 +911,7 @@ export class ExamService {
           student_id: s.studentId,
           name: fullName(s),
           admission_number: s.admissionNumber ?? s.studentNumber,
+          section_id: s.sectionId,
           section_name: s.sectionName,
           marks: num(m?.marks),
           absent: m?.absent ?? false,
@@ -754,17 +921,27 @@ export class ExamService {
     };
   }
 
-  async saveMarks(tenantId: string, paperId: string, input: z.infer<typeof SaveMarksBody>, actor: Actor) {
+  async saveMarks(
+    tenantId: string,
+    paperId: string,
+    input: z.infer<typeof SaveMarksBody>,
+    actor: Actor,
+  ) {
     const { paper, exam } = await this.loadPaper(tenantId, paperId);
     this.assertOpen(exam);
     const max = num(paper.maxMarks)!;
     const roster = new Set(
-      (await this.roster(tenantId, exam.academicYearId, paper.classId)).map((r) => r.studentId),
+      (
+        await this.roster(tenantId, exam.academicYearId, paper.classId, this.db, exam.sectionId)
+      ).map((r) => r.studentId),
     );
     const issues: { path: string; message: string }[] = [];
     input.records.forEach((r, i) => {
       if (!roster.has(r.student_id))
-        issues.push({ path: `records.${i}.student_id`, message: 'This student is not in the class' });
+        issues.push({
+          path: `records.${i}.student_id`,
+          message: 'This student is not in the class',
+        });
       if (!r.absent && r.marks != null && r.marks > max)
         issues.push({ path: `records.${i}.marks`, message: `Marks cannot be more than ${max}` });
     });
@@ -819,6 +996,64 @@ export class ExamService {
     return this.getMarks(tenantId, paperId);
   }
 
+  // ---- hand-in per section (teacher app) ----------------------------------------------
+
+  /** Hand-in rows of a paper, keyed by section id. */
+  async sectionStatus(tenantId: string, paperId: string, ex: Executor = this.db) {
+    const rows = await ex
+      .select()
+      .from(examPaperSections)
+      .where(and(eq(examPaperSections.tenantId, tenantId), eq(examPaperSections.paperId, paperId)));
+    return new Map(rows.map((r) => [r.sectionId, r]));
+  }
+
+  /** The office sends a section's marks back to the teacher (SUBMITTED → DRAFT). */
+  async returnSection(
+    tenantId: string,
+    paperId: string,
+    sectionId: string,
+    note: string | null,
+    actor: Actor,
+  ) {
+    const { exam } = await this.loadPaper(tenantId, paperId);
+    this.assertOpen(exam);
+    await this.db.transaction(async (tx) => {
+      const [row] = await tx
+        .select()
+        .from(examPaperSections)
+        .where(
+          and(
+            eq(examPaperSections.tenantId, tenantId),
+            eq(examPaperSections.paperId, paperId),
+            eq(examPaperSections.sectionId, sectionId),
+          ),
+        )
+        .for('update');
+      if (!row || row.status !== 'SUBMITTED')
+        throw new BusinessRuleError('INVALID_STATE', 'These marks have not been handed in', {
+          reason: 'NOT_SUBMITTED',
+        });
+      await tx
+        .update(examPaperSections)
+        .set({
+          status: 'DRAFT',
+          returnedBy: actor.userId,
+          returnedAt: new Date(),
+          returnNote: note?.trim() || null,
+          version: row.version + 1,
+        })
+        .where(eq(examPaperSections.id, row.id));
+      await recordChange(tx, actor, tenantId, {
+        action: 'EXAM_MARKS_RETURNED',
+        entityType: 'exam_paper',
+        entityId: paperId,
+        event: 'exam.marks_returned',
+        after: { section_id: sectionId },
+      });
+    });
+    return this.getMarks(tenantId, paperId);
+  }
+
   // ---- results ---------------------------------------------------------------------
 
   /** Calculated from the marks every time; nothing here is stored. */
@@ -830,7 +1065,7 @@ export class ExamService {
   private async resultsFor(tenantId: string, exam: Exam, classId: string) {
     const papers = await this.paperRows(tenantId, exam, classId);
     const [roster, marks] = await Promise.all([
-      this.roster(tenantId, exam.academicYearId, classId),
+      this.roster(tenantId, exam.academicYearId, classId, this.db, exam.sectionId),
       papers.length
         ? this.db
             .select()
@@ -981,9 +1216,13 @@ export class ExamService {
   async publish(tenantId: string, id: string, input: z.infer<typeof PublishBody>, actor: Actor) {
     const ready = await this.readiness(tenantId, id);
     if (ready.papers === 0)
-      throw new BusinessRuleError('OPERATION_NOT_ALLOWED', 'Add at least one paper before publishing', {
-        reason: 'NO_PAPERS',
-      });
+      throw new BusinessRuleError(
+        'OPERATION_NOT_ALLOWED',
+        'Add at least one paper before publishing',
+        {
+          reason: 'NO_PAPERS',
+        },
+      );
     if (!ready.ready && !input.allow_incomplete)
       throw new ConflictError(
         'CONFIRMATION_REQUIRED',
@@ -1054,17 +1293,24 @@ export class ExamService {
         ),
       );
     const seen = new Map<string, { exam: Exam; classId: string }>();
-    for (const r of rows) seen.set(`${r.exam.id}:${r.paper.classId}`, { exam: r.exam, classId: r.paper.classId });
+    for (const r of rows)
+      seen.set(`${r.exam.id}:${r.paper.classId}`, { exam: r.exam, classId: r.paper.classId });
     const out = [];
     for (const { exam, classId } of seen.values()) {
       const res = await this.resultsFor(tenantId, exam, classId);
       const me = res.rows.find((r) => r.student_id === studentId);
       if (!me) continue;
+      const subjectAvg = new Map(res.subjects.map((x) => [x.paper_id, x.average]));
       out.push({
         exam_id: exam.id,
         exam_name: exam.name,
         exam_type: exam.examType,
         start_date: exam.startDate,
+        end_date: exam.endDate,
+        published_at: exam.publishedAt?.toISOString() ?? null,
+        class_id: classId,
+        section_name: me.section_name,
+        class_average: res.summary.average_percent,
         total: me.total,
         max_total: me.max_total,
         percentage: me.percentage,
@@ -1077,8 +1323,10 @@ export class ExamService {
           marks: s.marks,
           absent: s.absent,
           max_marks: s.max_marks,
+          pass_marks: s.pass_marks,
           grade: s.grade,
           passed: s.passed,
+          class_average: subjectAvg.get(s.paper_id) ?? null,
         })),
       });
     }

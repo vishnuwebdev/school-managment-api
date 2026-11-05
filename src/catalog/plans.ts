@@ -55,7 +55,6 @@ const BASE_STANDARD: FeatureCode[] = [
   'examinations',
   'fees',
   'timetable',
-  'leave',
   'parent_portal',
 ];
 const STANDARD: FeatureCode[] = withCapabilities(BASE_STANDARD);

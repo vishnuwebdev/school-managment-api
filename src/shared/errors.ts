@@ -10,7 +10,11 @@ export type ErrorCode =
   | 'SESSION_REVOKED'
   | 'INVALID_CREDENTIALS'
   | 'ACCOUNT_LOCKED'
+  | 'INVALID_PIN'
+  | 'PIN_NOT_SET'
+  | 'PIN_LOCKED'
   | 'NOT_A_TEACHER'
+  | 'NOT_A_PARENT'
   | 'ACCOUNT_DISABLED'
   | 'CONTEXT_SELECTION_REQUIRED'
   | 'PERMISSION_DENIED'
@@ -57,10 +61,13 @@ export class AuthenticationError extends AppError {
       | 'SESSION_EXPIRED'
       | 'SIGNED_OUT_ELSEWHERE'
       | 'SESSION_REVOKED'
-      | 'INVALID_CREDENTIALS' = 'AUTHENTICATION_REQUIRED',
+      | 'INVALID_CREDENTIALS'
+      | 'INVALID_PIN'
+      | 'PIN_NOT_SET' = 'AUTHENTICATION_REQUIRED',
     message = 'Authentication is required',
+    details: unknown = null,
   ) {
-    super(401, code, message);
+    super(401, code, message, details);
   }
 }
 
@@ -76,7 +83,9 @@ export class AuthorizationError extends AppError {
       | 'SUBSCRIPTION_EXPIRED'
       | 'ACCOUNT_DISABLED'
       | 'ACCOUNT_LOCKED'
+      | 'PIN_LOCKED'
       | 'NOT_A_TEACHER'
+      | 'NOT_A_PARENT'
     > = 'PERMISSION_DENIED',
     message = 'You do not have permission to perform this operation',
     details: unknown = null,

@@ -110,6 +110,7 @@ export class EnrollmentService {
         ? { id: r.e.sectionId, code: r.sectionCode, name: r.sectionName }
         : null,
       status: r.e.status,
+      roll_number: r.e.rollNumber,
       enrollment_type: r.e.enrollmentType,
       start_date: r.e.startDate,
       end_date: r.e.endDate,

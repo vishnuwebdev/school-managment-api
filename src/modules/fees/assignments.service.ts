@@ -1,8 +1,19 @@
-import { and, asc, count, desc, eq, inArray, isNull, or, sql, type SQL } from 'drizzle-orm';
-import { uuidv7 } from 'uuidv7';
-import type { z } from 'zod';
-import type { Deps } from '../../container.js';
-import type { Executor } from '../../db/client.js';
+import {
+  and,
+  asc,
+  count,
+  desc,
+  eq,
+  inArray,
+  isNull,
+  or,
+  sql,
+  type SQL,
+} from "drizzle-orm";
+import { uuidv7 } from "uuidv7";
+import type { z } from "zod";
+import type { Deps } from "../../container.js";
+import type { Executor } from "../../db/client.js";
 import {
   academicSections,
   academicYears,
@@ -13,26 +24,31 @@ import {
   OPEN_ENROLLMENT_STATUSES,
   studentFeeAssignments,
   students,
-} from '../../db/schema/index.js';
-import { publishEvent } from '../../platform/outbox.js';
-import { recordChange } from '../../platform/record.js';
+} from "../../db/schema/index.js";
+import { publishEvent } from "../../platform/outbox.js";
+import { recordChange } from "../../platform/record.js";
 import {
   AuthorizationError,
   ConflictError,
   NotFoundError,
   isDuplicateKeyError,
-} from '../../shared/errors.js';
-import { offsetOf, orderFrom, pageOf } from '../../shared/pagination.js';
-import { loadStudent, studentScope } from '../students/support.js';
+} from "../../shared/errors.js";
+import { offsetOf, orderFrom, pageOf } from "../../shared/pagination.js";
+import { loadStudent, studentScope } from "../students/support.js";
 import type {
   AssignmentListQuery,
   BulkAssignBody,
   BulkGenerateBody,
   CreateAssignmentBody,
   GenerateDemandsBody,
-} from './fees.schemas.js';
-import { applyBp, fromMinor, percentToBp, toMinor } from './money.js';
-import { periodsFor, type Period } from './schedule.js';
+} from "./fees.schemas.js";
+import { applyBp, fromMinor, percentToBp, toMinor } from "./money.js";
+import { periodsFor, type Period } from "./schedule.js";
+import {
+  applyGradeFeeOnEnrolment,
+  CHARGES_CODE,
+  isGradeCode,
+} from "./learner-schedule.js";
 import {
   businessRule,
   ensureSettings,
@@ -42,6 +58,7 @@ import {
   nextNumber,
   presentAssignment,
   presentDemand,
+  readSettings,
   schoolToday,
   statusAfter,
   studentMinis,
@@ -51,7 +68,7 @@ import {
   type ComponentRow,
   type DemandRow,
   type StructureRow,
-} from './support.js';
+} from "./support.js";
 
 const OPEN = [...OPEN_ENROLLMENT_STATUSES];
 const BULK_LIMIT = 1000;
@@ -83,7 +100,11 @@ export class AssignmentService {
 
   // ---- reads ------------------------------------------------------------------------------
 
-  private async decorate(ex: Executor, tenantId: string, rows: AssignmentRow[]) {
+  private async decorate(
+    ex: Executor,
+    tenantId: string,
+    rows: AssignmentRow[],
+  ) {
     if (!rows.length) return [];
     const [minis, structs, counts] = await Promise.all([
       studentMinis(
@@ -97,11 +118,16 @@ export class AssignmentService {
         .where(
           and(
             eq(feeStructures.tenantId, tenantId),
-            inArray(feeStructures.id, [...new Set(rows.map((r) => r.feeStructureId))]),
+            inArray(feeStructures.id, [
+              ...new Set(rows.map((r) => r.feeStructureId)),
+            ]),
           ),
         ),
       ex
-        .select({ id: feeDemands.studentFeeAssignmentId, n: sql<number>`count(*)` })
+        .select({
+          id: feeDemands.studentFeeAssignmentId,
+          n: sql<number>`count(*)`,
+        })
         .from(feeDemands)
         .where(
           and(
@@ -121,7 +147,13 @@ export class AssignmentService {
       return presentAssignment(a, {
         student: minis.get(a.studentId),
         structure: s
-          ? { id: s.id, code: s.code, name: s.name, version_no: s.versionNo, status: s.status }
+          ? {
+              id: s.id,
+              code: s.code,
+              name: s.name,
+              version_no: s.versionNo,
+              status: s.status,
+            }
           : undefined,
         demandCount: cm.get(a.id) ?? 0,
       });
@@ -132,7 +164,7 @@ export class AssignmentService {
     const a = studentFeeAssignments;
     const where = and(
       eq(a.tenantId, c.tenantId),
-      feeScope(c.principal, 'fees.read', a),
+      feeScope(c.principal, "fees.read", a),
       q.student_id ? eq(a.studentId, q.student_id) : undefined,
       q.fee_structure_id ? eq(a.feeStructureId, q.fee_structure_id) : undefined,
       q.academic_year_id ? eq(a.academicYearId, q.academic_year_id) : undefined,
@@ -145,13 +177,16 @@ export class AssignmentService {
       .from(a)
       .innerJoin(
         enrollments,
-        and(eq(enrollments.tenantId, a.tenantId), eq(enrollments.id, a.enrollmentId)),
+        and(
+          eq(enrollments.tenantId, a.tenantId),
+          eq(enrollments.id, a.enrollmentId),
+        ),
       )
       .where(where);
     const order = orderFrom(
       q,
       { assigned_at: a.assignedAt, created_at: a.createdAt },
-      'assigned_at',
+      "assigned_at",
     );
     const [rows, [total]] = await Promise.all([
       base.orderBy(order, desc(a.id)).limit(q.page_size).offset(offsetOf(q)),
@@ -160,7 +195,10 @@ export class AssignmentService {
         .from(a)
         .innerJoin(
           enrollments,
-          and(eq(enrollments.tenantId, a.tenantId), eq(enrollments.id, a.enrollmentId)),
+          and(
+            eq(enrollments.tenantId, a.tenantId),
+            eq(enrollments.id, a.enrollmentId),
+          ),
         )
         .where(where),
     ]);
@@ -176,27 +214,40 @@ export class AssignmentService {
   }
 
   async get(c: Caller, id: string, ex: Executor = this.db) {
-    const row = await loadAssignment(ex, c.tenantId, id, c.principal, 'fees.read');
+    const row = await loadAssignment(
+      ex,
+      c.tenantId,
+      id,
+      c.principal,
+      "fees.read",
+    );
     return (await this.decorate(ex, c.tenantId, [row]))[0]!;
   }
 
   // ---- create -------------------------------------------------------------------------------
 
   private requireDiscountRight(c: Caller, percent: string | undefined) {
-    if (percent !== undefined && !c.principal.permissions.has('fees.waivers.approve'))
+    if (
+      percent !== undefined &&
+      !c.principal.permissions.has("fees.waivers.approve")
+    )
       throw new AuthorizationError(
-        'PERMISSION_DENIED',
-        'Giving a discount needs the waiver approval permission',
-        { permission: 'fees.waivers.approve' },
+        "PERMISSION_DENIED",
+        "Giving a discount needs the waiver approval permission",
+        { permission: "fees.waivers.approve" },
       );
   }
 
   private async insertAssignment(
     tx: Executor,
-    c: Pick<Caller, 'tenantId' | 'actor'>,
+    c: Pick<Caller, "tenantId" | "actor">,
     s: StructureRow,
     enrollment: { id: string; studentId: string },
-    o: { discount_percent?: string; discount_reason?: string; notes?: string | null },
+    o: {
+      discount_percent?: string;
+      discount_reason?: string;
+      notes?: string | null;
+    },
   ): Promise<string> {
     const id = uuidv7();
     const now = this.deps.clock.now();
@@ -209,7 +260,7 @@ export class AssignmentService {
         academicYearId: s.academicYearId,
         feeStructureId: s.id,
         structureCode: s.code,
-        discountPercent: o.discount_percent ?? '0.00',
+        discountPercent: o.discount_percent ?? "0.00",
         discountReason: o.discount_percent ? (o.discount_reason ?? null) : null,
         notes: o.notes ?? null,
         assignedAt: now,
@@ -218,9 +269,9 @@ export class AssignmentService {
     } catch (err) {
       if (isDuplicateKeyError(err))
         throw new ConflictError(
-          'DUPLICATE_RESOURCE',
-          'The student already has an active assignment for this fee structure',
-          { reason: 'ALREADY_ASSIGNED' },
+          "DUPLICATE_RESOURCE",
+          "The student already has an active assignment for this fee structure",
+          { reason: "ALREADY_ASSIGNED" },
         );
       throw err;
     }
@@ -228,29 +279,37 @@ export class AssignmentService {
   }
 
   private assertAssignable(s: StructureRow) {
-    if (s.status !== 'PUBLISHED')
+    if (s.status !== "PUBLISHED")
       throw businessRule(
-        'STRUCTURE_NOT_PUBLISHED',
-        'Only a published fee structure can be assigned',
+        "STRUCTURE_NOT_PUBLISHED",
+        "Only a published fee structure can be assigned",
         { structure_status: s.status },
-        'OPERATION_NOT_ALLOWED',
+        "OPERATION_NOT_ALLOWED",
       );
   }
 
   async create(c: Caller, input: z.infer<typeof CreateAssignmentBody>) {
     this.requireDiscountRight(c, input.discount_percent);
     if (input.discount_percent && !input.discount_reason)
-      throw validationIssue('discount_reason', 'A reason is required for a discount');
+      throw validationIssue(
+        "discount_reason",
+        "A reason is required for a discount",
+      );
     let id!: string;
     await this.db.transaction(async (tx) => {
-      const s = await loadStructure(tx, c.tenantId, input.fee_structure_id, 'share');
+      const s = await loadStructure(
+        tx,
+        c.tenantId,
+        input.fee_structure_id,
+        "share",
+      );
       this.assertAssignable(s);
       const student = await loadStudent(
         tx,
         c.tenantId,
         input.student_id,
         c.principal,
-        'fees.manage',
+        "fees.manage",
       );
       const enrolQ = tx
         .select()
@@ -261,44 +320,49 @@ export class AssignmentService {
             eq(enrollments.studentId, student.id),
             eq(enrollments.academicYearId, s.academicYearId),
             inArray(enrollments.status, OPEN),
-            input.enrollment_id ? eq(enrollments.id, input.enrollment_id) : undefined,
+            input.enrollment_id
+              ? eq(enrollments.id, input.enrollment_id)
+              : undefined,
           ),
         );
       const [enrollment] = await enrolQ;
       if (!enrollment)
         throw businessRule(
-          input.enrollment_id ? 'ENROLLMENT_MISMATCH' : 'NO_ENROLLMENT',
+          input.enrollment_id ? "ENROLLMENT_MISMATCH" : "NO_ENROLLMENT",
           input.enrollment_id
-            ? 'That enrollment is not an open enrollment of the student in the structure’s academic year'
-            : 'The student has no open enrollment in the structure’s academic year',
+            ? "That enrollment is not an open enrollment of the student in the structure’s academic year"
+            : "The student has no open enrollment in the structure’s academic year",
           {},
-          'OPERATION_NOT_ALLOWED',
+          "OPERATION_NOT_ALLOWED",
         );
       if (s.academicSectionId && enrollment.sectionId !== s.academicSectionId)
         throw businessRule(
-          'SECTION_MISMATCH',
-          'The fee structure is for another section than the student’s enrollment',
+          "SECTION_MISMATCH",
+          "The fee structure is for another section than the student’s enrollment",
           { structure_section_id: s.academicSectionId },
-          'OPERATION_NOT_ALLOWED',
+          "OPERATION_NOT_ALLOWED",
         );
       if (s.academicClassId && enrollment.classId !== s.academicClassId)
         throw businessRule(
-          'CLASS_MISMATCH',
-          'The fee structure is for another class than the student’s enrollment',
-          { structure_class_id: s.academicClassId, enrollment_class_id: enrollment.classId },
-          'OPERATION_NOT_ALLOWED',
+          "CLASS_MISMATCH",
+          "The fee structure is for another class than the student’s enrollment",
+          {
+            structure_class_id: s.academicClassId,
+            enrollment_class_id: enrollment.classId,
+          },
+          "OPERATION_NOT_ALLOWED",
         );
       id = await this.insertAssignment(tx, c, s, enrollment, input);
       await recordChange(tx, c.actor, c.tenantId, {
-        action: 'STUDENT_FEE_ASSIGNED',
-        entityType: 'student_fee_assignment',
+        action: "STUDENT_FEE_ASSIGNED",
+        entityType: "student_fee_assignment",
         entityId: id,
-        event: 'student_fee.assigned',
+        event: "student_fee.assigned",
         after: {
           student_id: student.id,
           fee_structure_id: s.id,
           enrollment_id: enrollment.id,
-          discount_percent: input.discount_percent ?? '0.00',
+          discount_percent: input.discount_percent ?? "0.00",
         },
         reason: input.discount_percent ? (input.discount_reason ?? null) : null,
         payload: {
@@ -323,13 +387,18 @@ export class AssignmentService {
     tx: Executor,
     tenantId: string,
     enrollmentId: string,
-    actor: Pick<Caller, 'actor'>['actor'],
+    actor: Pick<Caller, "actor">["actor"],
   ): Promise<number> {
-    if (this.deps.env.FEES_AUTO_BILL === 'false') return 0;
+    if (this.deps.env.FEES_AUTO_BILL === "false") return 0;
     const [e] = await tx
       .select()
       .from(enrollments)
-      .where(and(eq(enrollments.tenantId, tenantId), eq(enrollments.id, enrollmentId)));
+      .where(
+        and(
+          eq(enrollments.tenantId, tenantId),
+          eq(enrollments.id, enrollmentId),
+        ),
+      );
     if (!e || !OPEN.includes(e.status)) return 0;
     const plans = await tx
       .select()
@@ -338,8 +407,11 @@ export class AssignmentService {
         and(
           eq(feeStructures.tenantId, tenantId),
           eq(feeStructures.academicYearId, e.academicYearId),
-          eq(feeStructures.status, 'PUBLISHED'),
-          or(isNull(feeStructures.academicClassId), eq(feeStructures.academicClassId, e.classId)),
+          eq(feeStructures.status, "PUBLISHED"),
+          or(
+            isNull(feeStructures.academicClassId),
+            eq(feeStructures.academicClassId, e.classId),
+          ),
           e.sectionId
             ? or(
                 isNull(feeStructures.academicSectionId),
@@ -357,17 +429,54 @@ export class AssignmentService {
           eq(studentFeeAssignments.tenantId, tenantId),
           eq(studentFeeAssignments.studentId, e.studentId),
           eq(studentFeeAssignments.academicYearId, e.academicYearId),
-          eq(studentFeeAssignments.status, 'ACTIVE'),
+          eq(studentFeeAssignments.status, "ACTIVE"),
         ),
       );
     const owned = new Set(have.map((r) => r.code));
-    const todo = plans.filter((p) => !owned.has(p.code));
+    // The year's one-off charges holder is never assigned automatically.
+    const todo = plans.filter(
+      (p) => !owned.has(p.code) && p.code !== CHARGES_CODE,
+    );
     if (!todo.length) return 0;
     await ensureSettings(tx, tenantId);
     const today = await schoolToday(tx, tenantId, this.deps.clock);
     const c = { tenantId, actor };
     let applied = 0;
     for (const s of todo) {
+      if (isGradeCode(s.code)) {
+        try {
+          await tx.transaction(async (sp) => {
+            const [y] = await sp
+              .select()
+              .from(academicYears)
+              .where(
+                and(
+                  eq(academicYears.tenantId, tenantId),
+                  eq(academicYears.id, s.academicYearId),
+                ),
+              );
+            const ctx = {
+              tenantId,
+              actor,
+              now: this.deps.clock.now(),
+              today,
+              settings: await readSettings(sp, tenantId),
+            };
+            await applyGradeFeeOnEnrolment(sp, ctx, e, s, {
+              id: y!.id,
+              startDate: y!.startDate,
+              endDate: y!.endDate,
+            });
+          });
+          applied++;
+        } catch (err) {
+          this.deps.log.warn(
+            { err, enrollmentId, structure: s.code },
+            "automatic grade fee billing failed",
+          );
+        }
+        continue;
+      }
       try {
         await tx.transaction(async (sp) => {
           const id = await this.insertAssignment(sp, c, s, e, {});
@@ -378,8 +487,8 @@ export class AssignmentService {
           await this.generateInTx(sp, c, a!, { issue: true }, false, today);
           await publishEvent(sp, actor, {
             tenantId,
-            eventType: 'student_fee.assigned',
-            aggregateType: 'student_fee_assignment',
+            eventType: "student_fee.assigned",
+            aggregateType: "student_fee_assignment",
             aggregateId: id,
             payload: {
               student_fee_assignment_id: id,
@@ -394,7 +503,10 @@ export class AssignmentService {
         });
         applied++;
       } catch (err) {
-        this.deps.log.warn({ err, enrollmentId, structure: s.code }, 'automatic fee billing failed');
+        this.deps.log.warn(
+          { err, enrollmentId, structure: s.code },
+          "automatic fee billing failed",
+        );
       }
     }
     return applied;
@@ -404,7 +516,10 @@ export class AssignmentService {
   async bulkAssign(c: Caller, input: z.infer<typeof BulkAssignBody>) {
     this.requireDiscountRight(c, input.discount_percent);
     if (input.discount_percent && !input.discount_reason)
-      throw validationIssue('discount_reason', 'A reason is required for a discount');
+      throw validationIssue(
+        "discount_reason",
+        "A reason is required for a discount",
+      );
     const out = {
       assigned: 0,
       skipped_existing: 0,
@@ -412,7 +527,12 @@ export class AssignmentService {
       assignment_ids: [] as string[],
     };
     await this.db.transaction(async (tx) => {
-      const s = await loadStructure(tx, c.tenantId, input.fee_structure_id, 'share');
+      const s = await loadStructure(
+        tx,
+        c.tenantId,
+        input.fee_structure_id,
+        "share",
+      );
       this.assertAssignable(s);
       let classId = input.class_id ?? null;
       if (input.section_id) {
@@ -425,52 +545,61 @@ export class AssignmentService {
               eq(academicSections.tenantId, c.tenantId),
             ),
           );
-        if (!sec) throw new NotFoundError('Section');
+        if (!sec) throw new NotFoundError("Section");
         if (sec.academicYearId !== s.academicYearId)
           throw businessRule(
-            'SECTION_YEAR_MISMATCH',
-            'The section belongs to another academic year than the fee structure',
+            "SECTION_YEAR_MISMATCH",
+            "The section belongs to another academic year than the fee structure",
             {},
-            'OPERATION_NOT_ALLOWED',
+            "OPERATION_NOT_ALLOWED",
           );
         if (classId && classId !== sec.classId)
-          throw validationIssue('class_id', 'The section is not in that class');
+          throw validationIssue("class_id", "The section is not in that class");
         classId = sec.classId;
       }
       if (s.academicClassId && classId && classId !== s.academicClassId)
         throw businessRule(
-          'CLASS_MISMATCH',
-          'The fee structure is for another class than the one selected',
+          "CLASS_MISMATCH",
+          "The fee structure is for another class than the one selected",
           { structure_class_id: s.academicClassId },
-          'OPERATION_NOT_ALLOWED',
+          "OPERATION_NOT_ALLOWED",
         );
       const targets = await tx
         .select({ e: enrollments })
         .from(enrollments)
         .innerJoin(
           students,
-          and(eq(students.tenantId, enrollments.tenantId), eq(students.id, enrollments.studentId)),
+          and(
+            eq(students.tenantId, enrollments.tenantId),
+            eq(students.id, enrollments.studentId),
+          ),
         )
         .where(
           and(
             eq(enrollments.tenantId, c.tenantId),
             eq(enrollments.academicYearId, s.academicYearId),
             inArray(enrollments.status, OPEN),
-            input.section_id ? eq(enrollments.sectionId, input.section_id) : undefined,
+            input.section_id
+              ? eq(enrollments.sectionId, input.section_id)
+              : undefined,
             classId ? eq(enrollments.classId, classId) : undefined,
-            s.academicClassId ? eq(enrollments.classId, s.academicClassId) : undefined,
-            s.academicSectionId ? eq(enrollments.sectionId, s.academicSectionId) : undefined,
-            studentScope(c.principal, 'fees.manage'),
+            s.academicClassId
+              ? eq(enrollments.classId, s.academicClassId)
+              : undefined,
+            s.academicSectionId
+              ? eq(enrollments.sectionId, s.academicSectionId)
+              : undefined,
+            studentScope(c.principal, "fees.manage"),
           ),
         )
         .orderBy(asc(enrollments.id))
         .limit(BULK_LIMIT + 1);
       if (targets.length > BULK_LIMIT)
         throw businessRule(
-          'BULK_LIMIT',
+          "BULK_LIMIT",
           `A bulk assignment covers at most ${BULK_LIMIT} students. Assign section by section.`,
           { limit: BULK_LIMIT },
-          'OPERATION_NOT_ALLOWED',
+          "OPERATION_NOT_ALLOWED",
         );
       out.total_students = targets.length;
       const existing = targets.length
@@ -481,7 +610,7 @@ export class AssignmentService {
               and(
                 eq(studentFeeAssignments.tenantId, c.tenantId),
                 eq(studentFeeAssignments.structureCode, s.code),
-                eq(studentFeeAssignments.status, 'ACTIVE'),
+                eq(studentFeeAssignments.status, "ACTIVE"),
                 inArray(
                   studentFeeAssignments.enrollmentId,
                   targets.map((t) => t.e.id),
@@ -501,8 +630,8 @@ export class AssignmentService {
           out.assignment_ids.push(id);
           await publishEvent(tx, c.actor, {
             tenantId: c.tenantId,
-            eventType: 'student_fee.assigned',
-            aggregateType: 'student_fee_assignment',
+            eventType: "student_fee.assigned",
+            aggregateType: "student_fee_assignment",
             aggregateId: id,
             payload: {
               student_fee_assignment_id: id,
@@ -520,8 +649,8 @@ export class AssignmentService {
         }
       }
       await recordChange(tx, c.actor, c.tenantId, {
-        action: 'STUDENT_FEES_BULK_ASSIGNED',
-        entityType: 'fee_structure',
+        action: "STUDENT_FEES_BULK_ASSIGNED",
+        entityType: "fee_structure",
         entityId: s.id,
         after: { ...out, assignment_ids: undefined },
         reason: input.discount_percent ? (input.discount_reason ?? null) : null,
@@ -533,14 +662,24 @@ export class AssignmentService {
 
   async cancel(c: Caller, id: string, reason: string) {
     await this.db.transaction(async (tx) => {
-      const a = await loadAssignment(tx, c.tenantId, id, c.principal, 'fees.manage', 'update');
-      if (a.status === 'CANCELLED')
-        throw businessRule('ALREADY_CANCELLED', 'The assignment is already cancelled');
+      const a = await loadAssignment(
+        tx,
+        c.tenantId,
+        id,
+        c.principal,
+        "fees.manage",
+        "update",
+      );
+      if (a.status === "CANCELLED")
+        throw businessRule(
+          "ALREADY_CANCELLED",
+          "The assignment is already cancelled",
+        );
       const now = this.deps.clock.now();
       await tx
         .update(studentFeeAssignments)
         .set({
-          status: 'CANCELLED',
+          status: "CANCELLED",
           cancelledAt: now,
           cancelledBy: c.actor.userId,
           cancelReason: reason,
@@ -555,16 +694,16 @@ export class AssignmentService {
           and(
             eq(feeDemands.tenantId, c.tenantId),
             eq(feeDemands.studentFeeAssignmentId, id),
-            eq(feeDemands.status, 'DRAFT'),
+            eq(feeDemands.status, "DRAFT"),
           ),
         )
         .orderBy(feeDemands.id)
-        .for('update');
+        .for("update");
       if (drafts.length)
         await tx
           .update(feeDemands)
           .set({
-            status: 'CANCELLED',
+            status: "CANCELLED",
             cancelledAt: now,
             cancelledBy: c.actor.userId,
             cancelReason: `Assignment cancelled: ${reason}`.slice(0, 500),
@@ -580,14 +719,17 @@ export class AssignmentService {
             ),
           );
       await recordChange(tx, c.actor, c.tenantId, {
-        action: 'STUDENT_FEE_CANCELLED',
-        entityType: 'student_fee_assignment',
+        action: "STUDENT_FEE_CANCELLED",
+        entityType: "student_fee_assignment",
         entityId: id,
-        event: 'student_fee.cancelled',
-        before: { status: 'ACTIVE' },
-        after: { status: 'CANCELLED', draft_demands_cancelled: drafts.length },
+        event: "student_fee.cancelled",
+        before: { status: "ACTIVE" },
+        after: { status: "CANCELLED", draft_demands_cancelled: drafts.length },
         reason,
-        payload: { student_id: a.studentId, fee_structure_id: a.feeStructureId },
+        payload: {
+          student_id: a.studentId,
+          fee_structure_id: a.feeStructureId,
+        },
       });
     });
     return this.get(c, id);
@@ -600,10 +742,17 @@ export class AssignmentService {
     tx: Executor,
     tenantId: string,
     a: AssignmentRow,
-    sel: Pick<Selection, 'component_ids' | 'period_keys'>,
+    sel: Pick<Selection, "component_ids" | "period_keys">,
     strict: boolean,
-  ): Promise<{ planned: Planned[]; existing: Map<string, DemandRow>; structure: StructureRow }> {
+  ): Promise<{
+    planned: Planned[];
+    existing: Map<string, DemandRow>;
+    structure: StructureRow;
+  }> {
     const structure = await loadStructure(tx, tenantId, a.feeStructureId);
+    // Grade fees follow the learner's payment plan and charges are added one by one (learner-schedule.ts).
+    if (isGradeCode(structure.code) || structure.code === CHARGES_CODE)
+      return { planned: [], existing: new Map(), structure };
     const [year] = await tx
       .select()
       .from(academicYears)
@@ -612,19 +761,28 @@ export class AssignmentService {
       .select()
       .from(feeComponents)
       .where(
-        and(eq(feeComponents.tenantId, tenantId), eq(feeComponents.feeStructureId, structure.id)),
+        and(
+          eq(feeComponents.tenantId, tenantId),
+          eq(feeComponents.feeStructureId, structure.id),
+        ),
       )
-      .orderBy(asc(feeComponents.displayOrder), asc(feeComponents.name), asc(feeComponents.id));
+      .orderBy(
+        asc(feeComponents.displayOrder),
+        asc(feeComponents.name),
+        asc(feeComponents.id),
+      );
     if (strict && sel.component_ids) {
       const known = new Set(comps.map((k) => k.id));
       const bad = sel.component_ids.filter((x) => !known.has(x));
       if (bad.length)
         throw validationIssue(
-          'component_ids',
-          `Not components of this fee structure: ${bad.join(', ')}`,
+          "component_ids",
+          `Not components of this fee structure: ${bad.join(", ")}`,
         );
     }
-    const chosen = comps.filter((k) => !sel.component_ids || sel.component_ids.includes(k.id));
+    const chosen = comps.filter(
+      (k) => !sel.component_ids || sel.component_ids.includes(k.id),
+    );
     const planned: Planned[] = [];
     for (const component of chosen)
       for (const period of periodsFor(component, year!))
@@ -635,24 +793,43 @@ export class AssignmentService {
       const bad = sel.period_keys.filter((k) => !have.has(k));
       if (bad.length)
         throw validationIssue(
-          'period_keys',
-          `No such period for the chosen components: ${bad.join(', ')}`,
+          "period_keys",
+          `No such period for the chosen components: ${bad.join(", ")}`,
         );
     }
     const existingRows = await tx
       .select()
       .from(feeDemands)
-      .where(and(eq(feeDemands.tenantId, tenantId), eq(feeDemands.studentFeeAssignmentId, a.id)));
+      .where(
+        and(
+          eq(feeDemands.tenantId, tenantId),
+          eq(feeDemands.studentFeeAssignmentId, a.id),
+        ),
+      );
     return {
       planned,
-      existing: new Map(existingRows.map((d) => [`${d.feeComponentId}|${d.periodKey}`, d])),
+      existing: new Map(
+        existingRows.map((d) => [`${d.feeComponentId}|${d.periodKey}`, d]),
+      ),
       structure,
     };
   }
 
   async preview(c: Caller, id: string) {
-    const a = await loadAssignment(this.db, c.tenantId, id, c.principal, 'fees.read');
-    const { planned, existing, structure } = await this.plan(this.db, c.tenantId, a, {}, false);
+    const a = await loadAssignment(
+      this.db,
+      c.tenantId,
+      id,
+      c.principal,
+      "fees.read",
+    );
+    const { planned, existing, structure } = await this.plan(
+      this.db,
+      c.tenantId,
+      a,
+      {},
+      false,
+    );
     const today = await schoolToday(this.db, c.tenantId, this.deps.clock);
     const bp = percentToBp(a.discountPercent);
     return {
@@ -685,21 +862,29 @@ export class AssignmentService {
    */
   async generateInTx(
     tx: Executor,
-    c: Pick<Caller, 'tenantId' | 'actor'>,
+    c: Pick<Caller, "tenantId" | "actor">,
     a: AssignmentRow,
     sel: Selection,
     strict: boolean,
     today: string,
   ) {
-    const { planned, existing, structure } = await this.plan(tx, c.tenantId, a, sel, strict);
-    const todo = planned.filter((p) => !existing.has(`${p.component.id}|${p.period.key}`));
+    const { planned, existing, structure } = await this.plan(
+      tx,
+      c.tenantId,
+      a,
+      sel,
+      strict,
+    );
+    const todo = planned.filter(
+      (p) => !existing.has(`${p.component.id}|${p.period.key}`),
+    );
     const now = this.deps.clock.now();
     const bp = percentToBp(a.discountPercent);
     const created: DemandRow[] = [];
     if (todo.length) {
       const numbers: string[] = [];
       for (let i = 0; i < todo.length; i++)
-        numbers.push(await nextNumber(tx, c.tenantId, 'FEE', now));
+        numbers.push(await nextNumber(tx, c.tenantId, "FEE", now));
       const rows = todo.map(({ component, period }, i) => {
         const original = toMinor(component.amount);
         const discount = applyBp(original, bp);
@@ -713,8 +898,12 @@ export class AssignmentService {
           writtenOff: 0n,
         };
         const status = sel.issue
-          ? statusAfter({ status: 'ISSUED', dueDate: period.dueDate }, money, today)
-          : ('DRAFT' as const);
+          ? statusAfter(
+              { status: "ISSUED", dueDate: period.dueDate },
+              money,
+              today,
+            )
+          : ("DRAFT" as const);
         return {
           id: uuidv7(),
           tenantId: c.tenantId,
@@ -746,14 +935,18 @@ export class AssignmentService {
       const fresh = await tx
         .select()
         .from(feeDemands)
-        .where(and(eq(feeDemands.tenantId, c.tenantId), inArray(feeDemands.id, ids)))
+        .where(
+          and(eq(feeDemands.tenantId, c.tenantId), inArray(feeDemands.id, ids)),
+        )
         .orderBy(asc(feeDemands.dueDate), asc(feeDemands.demandNumber));
       created.push(...fresh);
       await recordChange(tx, c.actor, c.tenantId, {
-        action: sel.issue ? 'FEE_DEMANDS_GENERATED_AND_ISSUED' : 'FEE_DEMANDS_GENERATED',
-        entityType: 'student_fee_assignment',
+        action: sel.issue
+          ? "FEE_DEMANDS_GENERATED_AND_ISSUED"
+          : "FEE_DEMANDS_GENERATED",
+        entityType: "student_fee_assignment",
         entityId: a.id,
-        event: 'fee_demand.generated',
+        event: "fee_demand.generated",
         after: { created: created.length, issued: sel.issue },
         payload: {
           student_id: a.studentId,
@@ -766,8 +959,8 @@ export class AssignmentService {
         for (const d of created)
           await publishEvent(tx, c.actor, {
             tenantId: c.tenantId,
-            eventType: 'fee_demand.issued',
-            aggregateType: 'fee_demand',
+            eventType: "fee_demand.issued",
+            aggregateType: "fee_demand",
             aggregateId: d.id,
             payload: {
               fee_demand_id: d.id,
@@ -787,16 +980,27 @@ export class AssignmentService {
     };
   }
 
-  async generate(c: Caller, id: string, sel: z.infer<typeof GenerateDemandsBody>) {
+  async generate(
+    c: Caller,
+    id: string,
+    sel: z.infer<typeof GenerateDemandsBody>,
+  ) {
     await ensureSettings(this.db, c.tenantId);
     const result = await this.db.transaction(async (tx) => {
-      const a = await loadAssignment(tx, c.tenantId, id, c.principal, 'fees.manage', 'update');
-      if (a.status !== 'ACTIVE')
+      const a = await loadAssignment(
+        tx,
+        c.tenantId,
+        id,
+        c.principal,
+        "fees.manage",
+        "update",
+      );
+      if (a.status !== "ACTIVE")
         throw businessRule(
-          'ASSIGNMENT_NOT_ACTIVE',
-          'Demands can only be generated for an active assignment',
+          "ASSIGNMENT_NOT_ACTIVE",
+          "Demands can only be generated for an active assignment",
           {},
-          'OPERATION_NOT_ALLOWED',
+          "OPERATION_NOT_ALLOWED",
         );
       const today = await schoolToday(tx, c.tenantId, this.deps.clock);
       return this.generateInTx(tx, c, a, sel, true, today);
@@ -828,15 +1032,19 @@ export class AssignmentService {
       const a = studentFeeAssignments;
       const conds: (SQL | undefined)[] = [
         eq(a.tenantId, c.tenantId),
-        eq(a.status, 'ACTIVE'),
-        feeScope(c.principal, 'fees.manage', a),
+        eq(a.status, "ACTIVE"),
+        feeScope(c.principal, "fees.manage", a),
         input.assignment_ids ? inArray(a.id, input.assignment_ids) : undefined,
-        input.fee_structure_id ? eq(a.feeStructureId, input.fee_structure_id) : undefined,
+        input.fee_structure_id
+          ? eq(a.feeStructureId, input.fee_structure_id)
+          : undefined,
       ];
       if (input.section_id || input.class_id)
         conds.push(
           sql`exists (select 1 from ${enrollments} where ${enrollments.tenantId} = ${a.tenantId} and ${enrollments.id} = ${a.enrollmentId} ${
-            input.section_id ? sql`and ${enrollments.sectionId} = ${input.section_id}` : sql``
+            input.section_id
+              ? sql`and ${enrollments.sectionId} = ${input.section_id}`
+              : sql``
           } ${input.class_id ? sql`and ${enrollments.classId} = ${input.class_id}` : sql``})`,
         );
       const locked = await tx
@@ -845,17 +1053,18 @@ export class AssignmentService {
         .where(and(...conds))
         .orderBy(asc(a.id))
         .limit(BULK_LIMIT + 1)
-        .for('update');
+        .for("update");
       if (locked.length > BULK_LIMIT)
         throw businessRule(
-          'BULK_LIMIT',
+          "BULK_LIMIT",
           `A bulk generation covers at most ${BULK_LIMIT} assignments. Narrow it by section.`,
           { limit: BULK_LIMIT },
-          'OPERATION_NOT_ALLOWED',
+          "OPERATION_NOT_ALLOWED",
         );
       const today = await schoolToday(tx, c.tenantId, this.deps.clock);
       const out = [];
-      for (const row of locked) out.push(await this.generateInTx(tx, c, row, sel, false, today));
+      for (const row of locked)
+        out.push(await this.generateInTx(tx, c, row, sel, false, today));
       return out;
     });
     const createdCount = results.reduce((n, r) => n + r.created.length, 0);

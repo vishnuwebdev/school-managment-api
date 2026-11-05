@@ -169,6 +169,26 @@ export class TimetableService {
           { reason: 'YEAR_NOT_OPEN', academic_year_status: year.status },
         );
       this.assertDatesInYear(year, input.effective_from, input.effective_to);
+      // One draft per academic year, so every edit (and every lesson placed from
+      // the periods screen) lands in the same version. The year row lock above
+      // serialises concurrent creates.
+      const [draft] = await tx
+        .select({ id: timetables.id, name: timetables.name, versionNo: timetables.versionNo })
+        .from(timetables)
+        .where(
+          and(
+            eq(timetables.tenantId, tenantId),
+            eq(timetables.academicYearId, year.id),
+            eq(timetables.status, 'DRAFT'),
+          ),
+        )
+        .limit(1);
+      if (draft)
+        throw new BusinessRuleError(
+          'OPERATION_NOT_ALLOWED',
+          `There is already a draft (${draft.name}, version ${draft.versionNo}). Publish or delete it before starting a new one.`,
+          { reason: 'DRAFT_EXISTS', timetable_id: draft.id },
+        );
       let source: TimetableRow | null = null;
       if (input.copy_from_id) {
         source = await loadTimetable(tx, tenantId, input.copy_from_id, principal, {
@@ -334,6 +354,7 @@ export class TimetableService {
         dayOfWeek: e.dayOfWeek,
         periodId: e.periodId,
         sectionId: e.sectionId,
+        classId: e.classId,
         subjectOfferingId: e.subjectOfferingId,
         teachingAssignmentId: assignmentId,
         teacherId: e.teacherId,

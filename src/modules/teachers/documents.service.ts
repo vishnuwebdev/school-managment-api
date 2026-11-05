@@ -169,14 +169,17 @@ export class StaffDocumentService {
   // ---- A staff member's documents -----------------------------------------------------------------
 
   /** Required types with what is on file; a type is MISSING, UPLOADED, EXPIRING or EXPIRED. */
-  async list(tenantId: string, teacherId: string, principal: Principal) {
-    const teacher = await loadTeacher(
-      this.db,
-      tenantId,
-      teacherId,
-      principal,
-      'teachers.documents.read',
-    );
+  /**
+   * `permission` lets the teacher app read the teacher's own documents with
+   * `teachers.read`, whose scope is the teacher's own record only.
+   */
+  async list(
+    tenantId: string,
+    teacherId: string,
+    principal: Principal,
+    permission: 'teachers.documents.read' | 'teachers.read' = 'teachers.documents.read',
+  ) {
+    const teacher = await loadTeacher(this.db, tenantId, teacherId, principal, permission);
     const types = await this.types(tenantId, false);
     const docs = await this.db
       .select()
@@ -407,8 +410,14 @@ export class StaffDocumentService {
     });
   }
 
-  async download(tenantId: string, teacherId: string, docId: string, principal: Principal) {
-    await loadTeacher(this.db, tenantId, teacherId, principal, 'teachers.documents.read');
+  async download(
+    tenantId: string,
+    teacherId: string,
+    docId: string,
+    principal: Principal,
+    permission: 'teachers.documents.read' | 'teachers.read' = 'teachers.documents.read',
+  ) {
+    await loadTeacher(this.db, tenantId, teacherId, principal, permission);
     const [doc] = await this.db
       .select()
       .from(staffDocuments)

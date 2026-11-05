@@ -1,6 +1,6 @@
-import { and, eq, inArray, sql, type SQL } from 'drizzle-orm';
-import type { AnyMySqlColumn } from 'drizzle-orm/mysql-core';
-import type { Executor } from '../../db/client.js';
+import { and, eq, inArray, sql, type SQL } from "drizzle-orm";
+import type { AnyMySqlColumn } from "drizzle-orm/mysql-core";
+import type { Executor } from "../../db/client.js";
 import {
   enrollments,
   feeAdjustments,
@@ -18,20 +18,23 @@ import {
   students,
   tenantSettings,
   type FeeDemandStatus,
-} from '../../db/schema/index.js';
-import type { Actor, Principal } from '../../platform/context.js';
+} from "../../db/schema/index.js";
+import type { Actor, Principal } from "../../platform/context.js";
 import {
   AuthorizationError,
   BusinessRuleError,
   NotFoundError,
   ValidationError,
-} from '../../shared/errors.js';
-import { hasTenantWideScope, scopesFor } from '../access/authorization.service.js';
-import { fromMinor, toMinor } from './money.js';
+} from "../../shared/errors.js";
+import {
+  hasTenantWideScope,
+  scopesFor,
+} from "../access/authorization.service.js";
+import { fromMinor, toMinor } from "./money.js";
 
-export type { Caller } from '../attendance/support.js';
-export { rows, schoolToday } from '../attendance/support.js';
-export { nextNumber } from '../students/support.js';
+export type { Caller } from "../attendance/support.js";
+export { rows, schoolToday } from "../attendance/support.js";
+export { nextNumber } from "../students/support.js";
 
 export type CategoryRow = typeof feeCategories.$inferSelect;
 export type SettingsRow = typeof feeSettings.$inferSelect;
@@ -47,9 +50,13 @@ export type RefundRow = typeof feeRefunds.$inferSelect;
 
 const OPEN = [...OPEN_ENROLLMENT_STATUSES];
 
-export function validationIssue(path: string, message: string, code = 'custom'): ValidationError {
-  return new ValidationError('The request is invalid', {
-    location: 'body',
+export function validationIssue(
+  path: string,
+  message: string,
+  code = "custom",
+): ValidationError {
+  return new ValidationError("The request is invalid", {
+    location: "body",
     issues: [{ path, code, message }],
   });
 }
@@ -61,11 +68,14 @@ export const staleVersion = (have: number, sent: number | undefined) =>
 export const isDeadlock = (err: unknown) => {
   let cur: unknown = err;
   for (let i = 0; i < 4 && cur; i++) {
-    if (typeof cur === 'object' && cur !== null && 'code' in cur) {
+    if (typeof cur === "object" && cur !== null && "code" in cur) {
       const c = (cur as { code: unknown }).code;
-      if (c === 'ER_LOCK_DEADLOCK' || c === 'ER_LOCK_WAIT_TIMEOUT') return true;
+      if (c === "ER_LOCK_DEADLOCK" || c === "ER_LOCK_WAIT_TIMEOUT") return true;
     }
-    cur = typeof cur === 'object' && cur !== null ? (cur as { cause?: unknown }).cause : undefined;
+    cur =
+      typeof cur === "object" && cur !== null
+        ? (cur as { cause?: unknown }).cause
+        : undefined;
   }
   return false;
 };
@@ -84,22 +94,25 @@ export async function withDeadlockRetry<T>(fn: () => Promise<T>): Promise<T> {
 
 // ---- time ---------------------------------------------------------------------------------
 
-export async function schoolTimezone(ex: Executor, tenantId: string): Promise<string> {
+export async function schoolTimezone(
+  ex: Executor,
+  tenantId: string,
+): Promise<string> {
   const [s] = await ex
     .select({ tz: tenantSettings.timezone })
     .from(tenantSettings)
     .where(eq(tenantSettings.tenantId, tenantId));
-  return s?.tz ?? 'UTC';
+  return s?.tz ?? "UTC";
 }
 
 /** Calendar date of an instant in a time zone (falls back to UTC). */
 export function dateInZone(tz: string, d: Date): string {
   try {
-    return new Intl.DateTimeFormat('en-CA', {
+    return new Intl.DateTimeFormat("en-CA", {
       timeZone: tz,
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
     }).format(d);
   } catch {
     return d.toISOString().slice(0, 10);
@@ -108,9 +121,13 @@ export function dateInZone(tz: string, d: Date): string {
 
 const DAY_MS = 86_400_000;
 export const daysBetween = (from: string, to: string) =>
-  Math.floor((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / DAY_MS);
+  Math.floor(
+    (Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / DAY_MS,
+  );
 export const addDaysIso = (iso: string, n: number) =>
-  new Date(Date.parse(`${iso}T00:00:00Z`) + n * DAY_MS).toISOString().slice(0, 10);
+  new Date(Date.parse(`${iso}T00:00:00Z`) + n * DAY_MS)
+    .toISOString()
+    .slice(0, 10);
 
 // ---- settings ---------------------------------------------------------------------------------
 
@@ -120,7 +137,10 @@ const ready = new Set<string>();
  * Idempotent, concurrency-safe creation of the school's fee settings row (currency defaults to the
  * school currency). Runs on fee paths BEFORE the caller opens its transaction.
  */
-export async function ensureSettings(db: Executor, tenantId: string): Promise<void> {
+export async function ensureSettings(
+  db: Executor,
+  tenantId: string,
+): Promise<void> {
   if (ready.has(tenantId)) return;
   for (let attempt = 0; ; attempt++) {
     try {
@@ -130,8 +150,10 @@ export async function ensureSettings(db: Executor, tenantId: string): Promise<vo
         .where(eq(tenantSettings.tenantId, tenantId));
       await db
         .insert(feeSettings)
-        .values({ tenantId, currency: ts?.currency ?? 'INR' })
-        .onDuplicateKeyUpdate({ set: { tenantId: sql`${feeSettings.tenantId}` } });
+        .values({ tenantId, currency: ts?.currency ?? "INR" })
+        .onDuplicateKeyUpdate({
+          set: { tenantId: sql`${feeSettings.tenantId}` },
+        });
       ready.add(tenantId);
       return;
     } catch (err) {
@@ -144,11 +166,15 @@ export async function ensureSettings(db: Executor, tenantId: string): Promise<vo
 export async function readSettings(
   ex: Executor,
   tenantId: string,
-  lock: 'share' | 'update' | false = false,
+  lock: "share" | "update" | false = false,
 ): Promise<SettingsRow> {
-  const q = ex.select().from(feeSettings).where(eq(feeSettings.tenantId, tenantId));
+  const q = ex
+    .select()
+    .from(feeSettings)
+    .where(eq(feeSettings.tenantId, tenantId));
   const [row] = await (lock ? q.for(lock) : q);
-  if (!row) throw new Error('Fee settings missing: ensureSettings must run first');
+  if (!row)
+    throw new Error("Fee settings missing: ensureSettings must run first");
   return row;
 }
 
@@ -159,6 +185,12 @@ export const settingsPresent = (s: SettingsRow) => ({
   late_fee_value: s.lateFeeValue,
   late_fee_grace_days: s.lateFeeGraceDays,
   late_fee_cap: s.lateFeeCap,
+  monthly_instalments: s.monthlyInstalments,
+  monthly_due_day: s.monthlyDueDay,
+  term_due_dates: s.termDueDates ?? null,
+  annual_discount_percent: s.annualDiscountPercent,
+  annual_pay_by: s.annualPayBy,
+  default_payment_plan: s.defaultPaymentPlan,
   version: s.version,
   updated_at: s.updatedAt.toISOString(),
 });
@@ -181,13 +213,14 @@ export function feeScope(
   if (hasTenantWideScope(principal, permission)) return undefined;
   const grants = scopesFor(principal, permission);
   const sectionIds = grants.flatMap((g) =>
-    g.type === 'ASSIGNED_SECTION' ? (g.ref?.section_ids ?? []) : [],
+    g.type === "ASSIGNED_SECTION" ? (g.ref?.section_ids ?? []) : [],
   );
   const classIds = grants.flatMap((g) =>
-    g.type === 'ASSIGNED_CLASS' ? (g.ref?.class_ids ?? []) : [],
+    g.type === "ASSIGNED_CLASS" ? (g.ref?.class_ids ?? []) : [],
   );
   const placement: SQL[] = [];
-  if (sectionIds.length) placement.push(inArray(enrollments.sectionId, sectionIds));
+  if (sectionIds.length)
+    placement.push(inArray(enrollments.sectionId, sectionIds));
   if (classIds.length) placement.push(inArray(enrollments.classId, classIds));
   if (placement.length === 0) return sql`1 = 0`;
   return sql`exists (select 1 from ${enrollments} where ${enrollments.tenantId} = ${cols.tenantId} and ${enrollments.studentId} = ${cols.studentId} and ${inArray(enrollments.status, OPEN)} and (${sql.join(placement, sql` or `)}))`;
@@ -197,17 +230,17 @@ export function feeScope(
 export function requireWide(principal: Principal, permission: string) {
   if (!hasTenantWideScope(principal, permission))
     throw new AuthorizationError(
-      'PERMISSION_DENIED',
-      'This operation needs school-wide access to fees',
+      "PERMISSION_DENIED",
+      "This operation needs school-wide access to fees",
       { permission },
     );
 }
 
 export const separationOfDuties = (what: string) =>
   new AuthorizationError(
-    'PERMISSION_DENIED',
+    "PERMISSION_DENIED",
     `${what} must be done by someone other than the person who requested it`,
-    { reason: 'SEPARATION_OF_DUTIES' },
+    { reason: "SEPARATION_OF_DUTIES" },
   );
 
 // ---- demand arithmetic --------------------------------------------------------------------------------
@@ -234,9 +267,11 @@ export const moneyOf = (d: DemandRow): DemandMoney => ({
 
 export const finalOf = (m: DemandMoney) =>
   m.original - m.discount - m.concession - m.waiver + m.late;
-export const outstandingOfMoney = (m: DemandMoney) => finalOf(m) - m.paid - m.writtenOff;
+export const outstandingOfMoney = (m: DemandMoney) =>
+  finalOf(m) - m.paid - m.writtenOff;
 /** original − discount − concession − waiver: what the late fee is measured against. */
-export const netBeforeLate = (m: DemandMoney) => m.original - m.discount - m.concession - m.waiver;
+export const netBeforeLate = (m: DemandMoney) =>
+  m.original - m.discount - m.concession - m.waiver;
 
 /**
  * The status a demand has, given its balance and due date. DRAFT and CANCELLED never change here.
@@ -249,24 +284,24 @@ export function statusAfter(
   m: DemandMoney,
   today: string,
 ): FeeDemandStatus {
-  if (d.status === 'DRAFT' || d.status === 'CANCELLED') return d.status;
+  if (d.status === "DRAFT" || d.status === "CANCELLED") return d.status;
   const out = outstandingOfMoney(m);
   if (out <= 0n) {
-    if (m.writtenOff > 0n) return 'WRITTEN_OFF';
-    return m.paid > 0n ? 'PAID' : 'WAIVED';
+    if (m.writtenOff > 0n) return "WRITTEN_OFF";
+    return m.paid > 0n ? "PAID" : "WAIVED";
   }
-  if (d.dueDate < today) return 'OVERDUE';
-  return m.paid > 0n ? 'PARTIALLY_PAID' : 'ISSUED';
+  if (d.dueDate < today) return "OVERDUE";
+  return m.paid > 0n ? "PARTIALLY_PAID" : "ISSUED";
 }
 
 const AMOUNT_COLUMNS = {
-  original: 'originalAmount',
-  discount: 'discountAmount',
-  concession: 'concessionAmount',
-  waiver: 'waiverAmount',
-  late: 'lateFeeAmount',
-  paid: 'paidAmount',
-  writtenOff: 'writtenOffAmount',
+  original: "originalAmount",
+  discount: "discountAmount",
+  concession: "concessionAmount",
+  waiver: "waiverAmount",
+  late: "lateFeeAmount",
+  paid: "paidAmount",
+  writtenOff: "writtenOffAmount",
 } as const;
 
 /**
@@ -286,23 +321,38 @@ export async function writeDemand(
 ): Promise<{ row: DemandRow; from: FeeDemandStatus; to: FeeDemandStatus }> {
   const m = { ...moneyOf(before), ...next };
   const set: Partial<typeof feeDemands.$inferInsert> = { ...o.extra };
-  for (const [k, col] of Object.entries(AMOUNT_COLUMNS) as [keyof DemandMoney, string][])
+  for (const [k, col] of Object.entries(AMOUNT_COLUMNS) as [
+    keyof DemandMoney,
+    string,
+  ][])
     (set as Record<string, string>)[col] = fromMinor(m[k]);
   set.finalAmount = fromMinor(finalOf(m));
   const to =
-    o.status ?? statusAfter({ status: before.status, dueDate: before.dueDate }, m, o.today);
+    o.status ??
+    statusAfter({ status: before.status, dueDate: before.dueDate }, m, o.today);
   set.status = to;
-  const settled = outstandingOfMoney(m) <= 0n && to !== 'DRAFT' && to !== 'CANCELLED';
+  const settled =
+    outstandingOfMoney(m) <= 0n && to !== "DRAFT" && to !== "CANCELLED";
   set.settledAt = settled ? (before.settledAt ?? o.now) : null;
   set.version = before.version + 1;
   await tx
     .update(feeDemands)
     .set(set)
-    .where(and(eq(feeDemands.id, before.id), eq(feeDemands.tenantId, before.tenantId)));
+    .where(
+      and(
+        eq(feeDemands.id, before.id),
+        eq(feeDemands.tenantId, before.tenantId),
+      ),
+    );
   const [row] = await tx
     .select()
     .from(feeDemands)
-    .where(and(eq(feeDemands.id, before.id), eq(feeDemands.tenantId, before.tenantId)));
+    .where(
+      and(
+        eq(feeDemands.id, before.id),
+        eq(feeDemands.tenantId, before.tenantId),
+      ),
+    );
   return { row: row!, from: before.status, to };
 }
 
@@ -314,7 +364,7 @@ export const effectiveStatusSql = (today: string) =>
 export const outstandingSql = sql`(${feeDemands.finalAmount} - ${feeDemands.paidAmount} - ${feeDemands.writtenOffAmount})`;
 
 /** Demands that are owed: issued and not yet settled or closed (before the overdue overlay). */
-export const OWED_STATUSES = ['ISSUED', 'PARTIALLY_PAID', 'OVERDUE'] as const;
+export const OWED_STATUSES = ["ISSUED", "PARTIALLY_PAID", "OVERDUE"] as const;
 export const inOwed = sql`${feeDemands.status} in ('ISSUED','PARTIALLY_PAID','OVERDUE')`;
 
 // ---- loaders --------------------------------------------------------------------------------------------
@@ -326,7 +376,7 @@ export async function loadDemand(
   id: string,
   principal: Principal,
   permission: string,
-  lock?: 'update' | 'share',
+  lock?: "update" | "share",
 ): Promise<DemandRow> {
   const q = ex
     .select()
@@ -339,7 +389,7 @@ export async function loadDemand(
       ),
     );
   const [row] = await (lock ? q.for(lock) : q);
-  if (!row) throw new NotFoundError('Fee demand');
+  if (!row) throw new NotFoundError("Fee demand");
   return row;
 }
 
@@ -349,7 +399,7 @@ export async function loadPayment(
   id: string,
   principal: Principal,
   permission: string,
-  lock?: 'update' | 'share',
+  lock?: "update" | "share",
 ): Promise<PaymentRow> {
   const q = ex
     .select()
@@ -362,7 +412,7 @@ export async function loadPayment(
       ),
     );
   const [row] = await (lock ? q.for(lock) : q);
-  if (!row) throw new NotFoundError('Payment');
+  if (!row) throw new NotFoundError("Payment");
   return row;
 }
 
@@ -372,7 +422,7 @@ export async function loadAssignment(
   id: string,
   principal: Principal,
   permission: string,
-  lock?: 'update' | 'share',
+  lock?: "update" | "share",
 ): Promise<AssignmentRow> {
   const q = ex
     .select()
@@ -385,7 +435,7 @@ export async function loadAssignment(
       ),
     );
   const [row] = await (lock ? q.for(lock) : q);
-  if (!row) throw new NotFoundError('Fee assignment');
+  if (!row) throw new NotFoundError("Fee assignment");
   return row;
 }
 
@@ -393,14 +443,14 @@ export async function loadStructure(
   ex: Executor,
   tenantId: string,
   id: string,
-  lock?: 'update' | 'share',
+  lock?: "update" | "share",
 ): Promise<StructureRow> {
   const q = ex
     .select()
     .from(feeStructures)
     .where(and(eq(feeStructures.id, id), eq(feeStructures.tenantId, tenantId)));
   const [row] = await (lock ? q.for(lock) : q);
-  if (!row) throw new NotFoundError('Fee structure');
+  if (!row) throw new NotFoundError("Fee structure");
   return row;
 }
 
@@ -408,14 +458,14 @@ export async function loadCategory(
   ex: Executor,
   tenantId: string,
   id: string,
-  lock?: 'update' | 'share',
+  lock?: "update" | "share",
 ): Promise<CategoryRow> {
   const q = ex
     .select()
     .from(feeCategories)
     .where(and(eq(feeCategories.id, id), eq(feeCategories.tenantId, tenantId)));
   const [row] = await (lock ? q.for(lock) : q);
-  if (!row) throw new NotFoundError('Fee category');
+  if (!row) throw new NotFoundError("Fee category");
   return row;
 }
 
@@ -432,7 +482,7 @@ export async function lockDemands(
     .from(feeDemands)
     .where(and(eq(feeDemands.tenantId, tenantId), inArray(feeDemands.id, ids)))
     .orderBy(feeDemands.id)
-    .for('update');
+    .for("update");
   for (const r of found) out.set(r.id, r);
   return out;
 }
@@ -441,7 +491,7 @@ export const businessRule = (
   reason: string,
   message: string,
   extra: Record<string, unknown> = {},
-  code: 'INVALID_STATE' | 'OPERATION_NOT_ALLOWED' = 'INVALID_STATE',
+  code: "INVALID_STATE" | "OPERATION_NOT_ALLOWED" = "INVALID_STATE",
 ) => new BusinessRuleError(code, message, { reason, ...extra });
 
 // ---- presenters --------------------------------------------------------------------------------------------
@@ -459,7 +509,10 @@ export const presentCategory = (c: CategoryRow) => ({
   updated_at: c.updatedAt.toISOString(),
 });
 
-export const presentComponent = (c: ComponentRow, category?: { code: string; name: string }) => ({
+export const presentComponent = (
+  c: ComponentRow,
+  category?: { code: string; name: string },
+) => ({
   id: c.id,
   fee_structure_id: c.feeStructureId,
   fee_category_id: c.feeCategoryId,
@@ -492,7 +545,9 @@ export const presentStructure = (
   description: s.description,
   version_no: s.versionNo,
   academic_year: extra.year ?? { id: s.academicYearId },
-  academic_class: s.academicClassId ? (extra.klass ?? { id: s.academicClassId }) : null,
+  academic_class: s.academicClassId
+    ? (extra.klass ?? { id: s.academicClassId })
+    : null,
   academic_section_id: s.academicSectionId,
   currency: s.currency,
   status: s.status,
@@ -524,7 +579,7 @@ export const studentMini = (s: {
 }): StudentMini => ({
   id: s.id,
   student_number: s.studentNumber,
-  full_name: [s.firstName, s.middleName, s.lastName].filter(Boolean).join(' '),
+  full_name: [s.firstName, s.middleName, s.lastName].filter(Boolean).join(" "),
 });
 
 /** Loads student summaries for a set of ids (tenant filtered). */
@@ -548,7 +603,13 @@ export const presentAssignment = (
   a: AssignmentRow,
   extra: {
     student?: StudentMini;
-    structure?: { id: string; code: string; name: string; version_no: number; status: string };
+    structure?: {
+      id: string;
+      code: string;
+      name: string;
+      version_no: number;
+      status: string;
+    };
     demandCount?: number;
   } = {},
 ) => ({
@@ -574,12 +635,17 @@ export const presentAssignment = (
 export function presentDemand(
   d: DemandRow,
   today: string,
-  extra: { student?: StudentMini; category?: { id: string; code: string; name: string } } = {},
+  extra: {
+    student?: StudentMini;
+    category?: { id: string; code: string; name: string };
+  } = {},
 ) {
   const m = moneyOf(d);
-  const out = d.status === 'CANCELLED' ? 0n : outstandingOfMoney(m);
+  const out = d.status === "CANCELLED" ? 0n : outstandingOfMoney(m);
   const overdue =
-    (d.status === 'ISSUED' || d.status === 'PARTIALLY_PAID' || d.status === 'OVERDUE') &&
+    (d.status === "ISSUED" ||
+      d.status === "PARTIALLY_PAID" ||
+      d.status === "OVERDUE") &&
     out > 0n &&
     d.dueDate < today;
   return {
@@ -605,7 +671,7 @@ export function presentDemand(
     written_off_amount: d.writtenOffAmount,
     outstanding_amount: fromMinor(out),
     due_date: d.dueDate,
-    status: overdue ? ('OVERDUE' as const) : d.status,
+    status: overdue ? ("OVERDUE" as const) : d.status,
     is_overdue: overdue,
     days_overdue: overdue ? daysBetween(d.dueDate, today) : 0,
     issued_at: iso(d.issuedAt),
@@ -622,7 +688,10 @@ export function presentDemand(
 }
 export type DemandView = ReturnType<typeof presentDemand>;
 
-export function presentPayment(p: PaymentRow, extra: { student?: StudentMini } = {}) {
+export function presentPayment(
+  p: PaymentRow,
+  extra: { student?: StudentMini } = {},
+) {
   const amount = toMinor(p.amount);
   const allocated = toMinor(p.allocatedAmount);
   const refunded = toMinor(p.refundedAmount);
@@ -760,6 +829,7 @@ export const presentRefund = (
 // ---- misc --------------------------------------------------------------------------------------------------
 
 /** Escape LIKE wildcards so a search for "50%" is literal. */
-export const likeOf = (s: string) => `%${s.replace(/[\\%_]/g, (m) => `\\${m}`)}%`;
+export const likeOf = (s: string) =>
+  `%${s.replace(/[\\%_]/g, (m) => `\\${m}`)}%`;
 
 export type { Actor };

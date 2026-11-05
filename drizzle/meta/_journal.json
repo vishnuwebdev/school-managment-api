@@ -211,6 +211,125 @@
       "when": 1791788903902,
       "tag": "0029_school_calendar",
       "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "5",
+      "when": 1792139800000,
+      "tag": "0030_app_pins",
+      "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "5",
+      "when": 1792220000000,
+      "tag": "0031_class_level_lessons",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "5",
+      "when": 1792306400000,
+      "tag": "0032_calendar_unified",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "5",
+      "when": 1792400000000,
+      "tag": "0033_live_timetable",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "5",
+      "when": 1792500000000,
+      "tag": "0034_period_days",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "5",
+      "when": 1792600000000,
+      "tag": "0035_subject_phases",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "5",
+      "when": 1792700000000,
+      "tag": "0036_class_class_teachers",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "5",
+      "when": 1792800000000,
+      "tag": "0037_exam_classes",
+      "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "5",
+      "when": 1792900000000,
+      "tag": "0038_exam_timetable",
+      "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "5",
+      "when": 1793000000000,
+      "tag": "0039_staff_half_day",
+      "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "5",
+      "when": 1793100000000,
+      "tag": "0040_teachers_only",
+      "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "5",
+      "when": 1793200000000,
+      "tag": "0041_teacher_attendance",
+      "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "5",
+      "when": 1793300000000,
+      "tag": "0042_learner_fee_plans",
+      "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "5",
+      "when": 1793400000000,
+      "tag": "0043_teacher_marks",
+      "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "5",
+      "when": 1793500000000,
+      "tag": "0044_teacher_notifications",
+      "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "5",
+      "when": 1793600000000,
+      "tag": "0045_parent_app",
+      "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "5",
+      "when": 1793700000000,
+      "tag": "0046_parent_requests",
+      "breakpoints": true
     }
   ]
 }

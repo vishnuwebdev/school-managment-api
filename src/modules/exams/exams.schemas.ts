@@ -85,7 +85,50 @@ export const SaveMarksBody = z.object({
 
 export const ResultsQuery = z.object({ class_id: z.uuid() });
 
+/** The office returns a section's handed-in marks to the teacher. */
+export const ReturnMarksBody = z.object({
+  note: z.string().trim().max(500).nullable().optional(),
+});
+
 export const PublishBody = z.object({
   /** Publish even though some marks are still missing. */
   allow_incomplete: z.boolean().default(false),
+});
+
+// ---- exam timetable ------------------------------------------------------------------
+
+/** 'HH:MM' (24h). */
+const Clock = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Use HH:MM (24-hour)');
+const TeacherIds = z.array(z.uuid()).max(20);
+
+export const SectionParams = z.object({ paper_id: z.uuid(), section_id: z.uuid() });
+
+/**
+ * When, where and by whom a paper is sat by the whole class. Omitted fields are kept;
+ * null clears. Times go together and need a date.
+ */
+export const PaperScheduleBody = z
+  .object({
+    exam_date: IsoDate.nullable().optional(),
+    start_time: Clock.nullable().optional(),
+    end_time: Clock.nullable().optional(),
+    venue_id: z.uuid().nullable().optional(),
+    invigilator_ids: TeacherIds.optional(),
+    marker_ids: TeacherIds.optional(),
+  })
+  .refine((b) => Object.keys(b).length > 0, 'Send something to change');
+
+/** A section sitting differently. null / omitted date, times or venue = same as the class. */
+export const SectionScheduleBody = z.object({
+  exam_date: IsoDate.nullable().optional(),
+  start_time: Clock.nullable().optional(),
+  end_time: Clock.nullable().optional(),
+  venue_id: z.uuid().nullable().optional(),
+  /** Omitted or empty = the class invigilators supervise this section too. */
+  invigilator_ids: TeacherIds.optional(),
+});
+
+export const DutiesQuery = z.object({
+  from: IsoDate.optional(),
+  to: IsoDate.optional(),
 });

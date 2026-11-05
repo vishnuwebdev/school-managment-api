@@ -1,5 +1,6 @@
 import {
   char,
+  foreignKey,
   index,
   int,
   mysqlEnum,
@@ -21,6 +22,11 @@ export const users = mysqlTable(
     id: id(),
     email: varchar('email', { length: 254 }).notNull(),
     phone: varchar('phone', { length: 32 }),
+    /**
+     * Mobile number the person signs in with (0045), digits only with country code, e.g.
+     * 919876543210. Set for parent logins; unique so a number names one account.
+     */
+    loginPhone: varchar('login_phone', { length: 20 }),
     passwordHash: varchar('password_hash', { length: 255 }),
     firstName: varchar('first_name', { length: 100 }).notNull(),
     lastName: varchar('last_name', { length: 100 }).notNull().default(''),
@@ -33,7 +39,11 @@ export const users = mysqlTable(
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
-  (t) => [uniqueIndex('users_email_uq').on(t.email), index('users_status_idx').on(t.status)],
+  (t) => [
+    uniqueIndex('users_email_uq').on(t.email),
+    uniqueIndex('users_login_phone_uq').on(t.loginPhone),
+    index('users_status_idx').on(t.status),
+  ],
 );
 
 /**
@@ -139,5 +149,45 @@ export const invitations = mysqlTable(
     uniqueIndex('invitations_token_hash_uq').on(t.tokenHash),
     index('invitations_membership_idx').on(t.membershipId, t.status),
     index('invitations_tenant_idx').on(t.tenantId, t.status),
+  ],
+);
+
+/**
+ * Mobile-app sign-in PIN, one per school login (membership). The app keeps a
+ * random device token from when the PIN was set; PIN sign-in needs both, so a
+ * 4-digit PIN is never guessable from email alone. Removing or resetting the
+ * PIN deletes the row, which also invalidates the device token.
+ */
+export const appPins = mysqlTable(
+  'app_pins',
+  {
+    id: id(),
+    tenantId: ref('tenant_id')
+      .notNull()
+      .references(() => tenants.id),
+    membershipId: ref('membership_id').notNull(),
+    userId: ref('user_id')
+      .notNull()
+      .references(() => users.id),
+    pinHash: varchar('pin_hash', { length: 255 }).notNull(),
+    /** SHA-256 of the device token. The raw token lives only on the device. */
+    deviceTokenHash: char('device_token_hash', { length: 64 }).notNull(),
+    deviceName: varchar('device_name', { length: 100 }),
+    deviceType: varchar('device_type', { length: 32 }),
+    failedAttempts: int('failed_attempts').notNull().default(0),
+    lockedAt: dt('locked_at'),
+    lastUsedAt: dt('last_used_at'),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex('app_pins_membership_uq').on(t.membershipId),
+    uniqueIndex('app_pins_device_token_uq').on(t.deviceTokenHash),
+    index('app_pins_user_idx').on(t.userId),
+    foreignKey({
+      name: 'app_pins_membership_fk',
+      columns: [t.tenantId, t.membershipId],
+      foreignColumns: [memberships.tenantId, memberships.id],
+    }),
   ],
 );

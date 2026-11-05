@@ -31,6 +31,8 @@ export interface InviteInput {
   /** null = platform membership */
   tenantId: string | null;
   assignments: AssignmentInput[];
+  /** Parent logins do not take a staff seat on the school's plan. */
+  skipPlanLimit?: boolean;
 }
 
 /**
@@ -81,7 +83,7 @@ export async function inviteMember(deps: Deps, tx: Executor, input: InviteInput,
       );
     }
     // Re-inviting a REVOKED member reuses the membership (history is in the audit log).
-    if (input.tenantId)
+    if (input.tenantId && !input.skipPlanLimit)
       await assertWithinPlanLimit(tx, input.tenantId, deps.clock.now(), 'STAFF_USERS');
     membershipId = prior.id;
     await tx
@@ -93,7 +95,7 @@ export async function inviteMember(deps: Deps, tx: Executor, input: InviteInput,
       .set({ status: 'REVOKED' })
       .where(and(eq(roleAssignments.membershipId, prior.id), eq(roleAssignments.status, 'ACTIVE')));
   } else {
-    if (input.tenantId)
+    if (input.tenantId && !input.skipPlanLimit)
       await assertWithinPlanLimit(tx, input.tenantId, deps.clock.now(), 'STAFF_USERS');
     const [row] = await tx
       .insert(memberships)

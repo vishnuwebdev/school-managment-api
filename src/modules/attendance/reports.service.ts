@@ -15,6 +15,7 @@ import type {
   StudentHistoryQuery,
   TodayQuery,
 } from './attendance.schemas.js';
+import type { CalendarService } from '../calendar/calendar.service.js';
 import type { AttendanceConfigService } from './config.service.js';
 import {
   emptyCounts,
@@ -69,6 +70,7 @@ export class ReportService {
     private readonly deps: Deps,
     private readonly config: AttendanceConfigService,
     private readonly sessions: SessionService,
+    private readonly calendar: CalendarService,
   ) {}
 
   private get db() {
@@ -404,6 +406,142 @@ export class ReportService {
         marked_count: marked,
         present_units: round2(present),
         absent_units: round2(absent),
+        percentage: percentage(present, marked),
+      },
+    };
+  }
+
+  /**
+   * The month as a simple grid: every student × every day of the month. A day is a
+   * holiday or weekly off for the class (HOLIDAY / OFF), the student's mark on that
+   * day's register (PRESENT, LATE, HALF_DAY, ABSENT, LEAVE — excused counts as leave —
+   * or OTHER), UPCOMING, or NOT_MARKED (a past school day with no mark for them).
+   * Day counts come from every register; the percentage uses final registers only,
+   * the one definition every report shares.
+   */
+  async monthGrid(c: Caller, q: z.infer<typeof MonthlyQuery>) {
+    await this.config.ensureDefaults(c.tenantId);
+    const { from, to } = monthRange(q.month);
+    const m = await this.matrix(c, q.section_id, from, to);
+    const today = await schoolToday(this.db, c.tenantId, this.deps.clock);
+    const cal = await this.calendar.workingDays(c.tenantId, from, to, {
+      kind: 'class',
+      classId: m.sec.sec.classId,
+      sectionId: m.sec.sec.id,
+    });
+    const offOn = new Map(cal.off_days.map((d) => [d.date, d]));
+    const sessionOn = new Map(m.sessions.map((s) => [s.date, s]));
+    const dates: string[] = [];
+    for (
+      let t = Date.parse(`${from}T00:00:00Z`);
+      t <= Date.parse(`${to}T00:00:00Z`);
+      t += 86_400_000
+    )
+      dates.push(new Date(t).toISOString().slice(0, 10));
+    const WEEKDAY = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const STATE: Record<string, string> = {
+      PRESENT: 'PRESENT',
+      LATE: 'LATE',
+      HALF_DAY: 'HALF_DAY',
+      ABSENT: 'ABSENT',
+      EXCUSED: 'LEAVE',
+      LEAVE: 'LEAVE',
+      OTHER: 'OTHER',
+    };
+    const students = m.students.map((s) => {
+      const counts = {
+        present: 0,
+        late: 0,
+        half_day: 0,
+        absent: 0,
+        leave: 0,
+        other: 0,
+        not_marked: 0,
+      };
+      let schoolDays = 0;
+      const days = dates.map((date) => {
+        const off = offOn.get(date);
+        if (off)
+          return {
+            date,
+            state: off.reason === 'HOLIDAY' ? 'HOLIDAY' : 'OFF',
+            status_code: null,
+            remarks: null,
+            final: false,
+          };
+        if (date <= today) schoolDays++;
+        const cell = s.cells[date];
+        if (cell) {
+          const state = STATE[cell.category] ?? 'OTHER';
+          const key = state.toLowerCase() as keyof typeof counts;
+          counts[key]++;
+          return {
+            date,
+            state,
+            status_code: cell.status_code,
+            remarks: cell.remarks,
+            final: cell.session_status === 'FINAL',
+          };
+        }
+        if (date > today)
+          return { date, state: 'UPCOMING', status_code: null, remarks: null, final: false };
+        counts.not_marked++;
+        return { date, state: 'NOT_MARKED', status_code: null, remarks: null, final: false };
+      });
+      return {
+        student: {
+          id: s.student.id,
+          student_number: s.student.student_number,
+          full_name: s.student.full_name,
+        },
+        days,
+        summary: {
+          school_days: schoolDays,
+          ...counts,
+          present_units: round2(s.present_units),
+          marked_count: s.marked,
+          percentage: percentage(s.present_units, s.marked),
+        },
+      };
+    });
+    let marked = 0;
+    let present = 0;
+    let absences = 0;
+    let notMarked = 0;
+    for (const s of students) {
+      marked += s.summary.marked_count;
+      present += s.summary.present_units;
+      absences += s.summary.absent;
+      notMarked += s.summary.not_marked;
+    }
+    const schoolDays = dates.filter((d) => !offOn.has(d) && d <= today).length;
+    return {
+      section: { id: m.sec.sec.id, code: m.sec.sec.code, name: m.sec.sec.name },
+      class: { id: m.sec.sec.classId, code: m.sec.classCode, name: m.sec.className },
+      month: q.month,
+      date_from: from,
+      date_to: to,
+      today,
+      partial: to > today,
+      days: dates.map((date) => {
+        const off = offOn.get(date);
+        const sess = sessionOn.get(date);
+        return {
+          date,
+          weekday: WEEKDAY[new Date(`${date}T00:00:00Z`).getUTCDay()]!,
+          off: off ? { reason: off.reason, name: off.name } : null,
+          future: date > today,
+          session_id: sess?.id ?? null,
+          session_status: sess?.status ?? null,
+        };
+      }),
+      students,
+      totals: {
+        students: students.length,
+        school_days: schoolDays,
+        registers_taken: m.sessions.filter((s) => !offOn.has(s.date)).length,
+        absences,
+        not_marked: notMarked,
         percentage: percentage(present, marked),
       },
     };

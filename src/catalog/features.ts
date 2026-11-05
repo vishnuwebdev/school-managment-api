@@ -64,11 +64,11 @@ export const FEATURES = [
     name: 'Academic structure',
     description: 'Academic years, terms, classes, sections and subjects.',
   },
-  { code: 'teachers', name: 'Teacher & staff management' },
+  { code: 'teachers', name: 'Teacher management' },
   {
     code: 'teachers.portal',
     name: 'Teacher portal access',
-    description: 'Invite teachers and staff to sign in.',
+    description: 'Invite teachers to sign in.',
     parent: 'teachers',
     kind: 'capability',
     dependsOn: ['teachers'],
@@ -76,18 +76,19 @@ export const FEATURES = [
   {
     // Paid add-on: not a capability, so no plan includes it automatically.
     // Switched on per school (platform override today; an ADD_ON subscription item later).
+    // Code kept from the old staff attendance so plans that had it keep it.
+    code: 'teachers.staff_attendance',
+    name: 'Teacher attendance',
+    description: 'Mark and view which days each teacher was present.',
+    parent: 'teachers',
+    kind: 'capability',
+    dependsOn: ['teachers'],
+  },
+  {
     code: 'teachers.mobile_app',
     name: 'Teacher mobile app',
     description: 'Teachers use the EduSphere Teacher app (iOS and Android).',
     parent: 'teachers',
-    dependsOn: ['teachers'],
-  },
-  {
-    code: 'teachers.staff_attendance',
-    name: 'Staff attendance',
-    description: 'Mark and view teacher and staff attendance.',
-    parent: 'teachers',
-    kind: 'capability',
     dependsOn: ['teachers'],
   },
 
@@ -156,7 +157,6 @@ export const FEATURES = [
   },
 
   { code: 'timetable', name: 'Timetable', dependsOn: ['academics', 'teachers'] },
-  { code: 'leave', name: 'Leave & staff availability', dependsOn: ['teachers'] },
 
   { code: 'communication', name: 'Communication & notices' },
   {

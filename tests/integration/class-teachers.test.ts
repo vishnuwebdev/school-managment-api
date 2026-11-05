@@ -115,21 +115,52 @@ describe('class teacher', () => {
     ).toBeNull();
   });
 
-  it('only accepts active teaching staff, and requires a reason to remove', async () => {
-    const nonTeaching = await api.post('/teachers', {
-      first_name: 'Clerk',
-      last_name: uniq('Fam'),
-      staff_type: 'NON_TEACHING',
-    });
-    const res = await api.put(`/sections/${secB}/class-teacher`, {
-      teacher_id: nonTeaching.body.data.id,
-    });
-    expect(res.status).toBe(422);
+  it('only accepts active teachers, and requires a reason to remove', async () => {
     const t = await newTeacher('Leaver');
     await api.post(`/teachers/${t.id}/resign`, { reason: 'Moving abroad' });
     const inactive = await api.put(`/sections/${secB}/class-teacher`, { teacher_id: t.id });
     expect(code(inactive)).toBe('INVALID_STATE');
     expect((await api.delete(`/sections/${secB}/class-teacher`, {})).status).toBe(422);
+  });
+});
+
+describe('class teacher of a class without sections', () => {
+  it('sets, replaces and removes the class teacher of a whole class; refused when it has sections', async () => {
+    const nursery = (
+      await api.post('/academic-classes', { code: uniq('N'), name: 'Nursery', sequence: 1 })
+    ).body.data.id;
+    const t1 = await newTeacher('Nina');
+    const t2 = await newTeacher('Omar');
+    const set = await api.put(`/academic-classes/${nursery}/class-teacher`, { teacher_id: t1.id });
+    expect(set.status, JSON.stringify(set.body)).toBe(200);
+    expect(set.body.data).toMatchObject({ class_id: nursery, academic_year_id: yearId });
+    expect(set.body.data.class_teacher.teacher_id).toBe(t1.id);
+    expect(
+      (await api.put(`/academic-classes/${nursery}/class-teacher`, { teacher_id: t1.id })).status,
+    ).toBe(409);
+    const swap = await api.put(
+      `/academic-classes/${nursery}/class-teacher?academic_year_id=${yearId}`,
+      { teacher_id: t2.id, reason: 'Rotation' },
+    );
+    expect(swap.body.data.class_teacher.teacher_id).toBe(t2.id);
+    const overview = (await api.get(`/academic-classes/overview?academic_year_id=${yearId}`)).body
+      .data;
+    const klass = overview.classes.find((c: { id: string }) => c.id === nursery);
+    expect(klass.class_teacher.id).toBe(t2.id);
+
+    // A class split into sections has a class teacher per section instead.
+    const split = await api.put(`/academic-classes/${classId}/class-teacher`, {
+      teacher_id: t1.id,
+    });
+    expect(split.status).toBe(422);
+    expect(split.body.error.details.reason).toBe('CLASS_HAS_SECTIONS');
+
+    expect(
+      (await api.delete(`/academic-classes/${nursery}/class-teacher`, { reason: 'Vacant' })).status,
+    ).toBe(204);
+    const after = (await api.get(`/academic-classes/overview?academic_year_id=${yearId}`)).body
+      .data;
+    expect(after.classes.find((c: { id: string }) => c.id === nursery).class_teacher).toBeNull();
   });
 });
 

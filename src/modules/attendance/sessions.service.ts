@@ -585,7 +585,7 @@ export class SessionService {
       const off = await this.calendar.dayOff(
         c.tenantId,
         input.session_date,
-        { kind: 'class', classId: section.classId },
+        { kind: 'class', classId: section.classId, sectionId: section.id },
         tx,
       );
       if (off)

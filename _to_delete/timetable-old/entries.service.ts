@@ -1,9 +1,10 @@
-import { and, count, eq, inArray, sql } from 'drizzle-orm';
+import { and, count, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { uuidv7 } from 'uuidv7';
 import type { z } from 'zod';
 import type { Deps } from '../../container.js';
 import type { Executor } from '../../db/client.js';
 import {
+  academicClasses,
   academicSections,
   subjectOfferings,
   teachers,
@@ -35,8 +36,10 @@ import {
   entryQuery,
   entryScope,
   fetchEntries,
+  loadClassOwner,
   loadSection,
   loadTimetable,
+  ownerKey,
   periodsForSection,
   presentEntry,
   readSettings,
@@ -60,7 +63,9 @@ interface Want {
   key: number;
   day: number;
   periodId: string;
-  sectionId: string;
+  /** Null for a class-level lesson (a class without sections); then [classId] is set. */
+  sectionId: string | null;
+  classId?: string;
   offeringId: string;
   /** Explicit teacher, assignment; else resolved from the offering. */
   teacherId?: string;
@@ -95,6 +100,8 @@ interface CellError {
 
 interface Refs {
   sections: Map<string, SectionRow>;
+  /** Classes of class-level wants, with whether they have sections in the timetable's year. */
+  classes: Map<string, { id: string; name: string; status: string; hasSections: boolean }>;
   periods: Map<string, PeriodRow>;
   venues: Map<string, VenueRow>;
   offerings: Map<string, OfferingRow>;
@@ -175,7 +182,7 @@ export class EntryService {
       eq(timetableEntries.timetableId, timetableId),
       entryScope(principal, 'timetable.read'),
       q.section_id ? eq(timetableEntries.sectionId, q.section_id) : undefined,
-      q.class_id ? eq(academicSections.classId, q.class_id) : undefined,
+      q.class_id ? eq(timetableEntries.classId, q.class_id) : undefined,
       q.teacher_id ? eq(timetableEntries.teacherId, q.teacher_id) : undefined,
       q.venue_id ? eq(timetableEntries.venueId, q.venue_id) : undefined,
       q.period_id ? eq(timetableEntries.periodId, q.period_id) : undefined,
@@ -187,17 +194,7 @@ export class EntryService {
         .orderBy(...ENTRY_ORDER)
         .limit(q.page_size)
         .offset((q.page - 1) * q.page_size),
-      this.db
-        .select({ n: count() })
-        .from(timetableEntries)
-        .innerJoin(
-          academicSections,
-          and(
-            eq(academicSections.tenantId, timetableEntries.tenantId),
-            eq(academicSections.id, timetableEntries.sectionId),
-          ),
-        )
-        .where(where),
+      this.db.select({ n: count() }).from(timetableEntries).where(where),
     ]);
     return {
       data: (rows as EntryJoined[]).map(presentEntry),
@@ -237,7 +234,8 @@ export class EntryService {
         key: 0,
         day: input.day_of_week,
         periodId: input.period_id,
-        sectionId: input.section_id,
+        sectionId: input.section_id ?? null,
+        ...(input.section_id ? {} : { classId: input.class_id }),
         offeringId: assignmentOffering!,
         ...(input.teacher_id ? { teacherId: input.teacher_id } : {}),
         ...(input.teaching_assignment_id ? { assignmentId: input.teaching_assignment_id } : {}),
@@ -286,6 +284,7 @@ export class EntryService {
         day: input.day_of_week ?? existing.dayOfWeek,
         periodId: input.period_id ?? existing.periodId,
         sectionId: existing.sectionId,
+        ...(existing.sectionId ? {} : { classId: existing.classId }),
         offeringId: input.subject_offering_id ?? existing.subjectOfferingId,
         ...(input.teacher_id ? { teacherId: input.teacher_id } : {}),
         ...(input.teaching_assignment_id ? { assignmentId: input.teaching_assignment_id } : {}),
@@ -355,14 +354,15 @@ export class EntryService {
   // ---- section grid --------------------------------------------------------------------
 
   /**
-   * Save cells of one section's grid in ONE transaction: everything is validated first
-   * and either the whole request is applied or nothing is. A cell with a null offering
-   * clears the slot. `replace` makes the request the whole truth for the section.
+   * Save cells of one section's grid (or, for a class without sections, the class's
+   * grid) in ONE transaction: everything is validated first and either the whole
+   * request is applied or nothing is. A cell with a null offering clears the slot.
+   * `replace` makes the request the whole truth for the section or class.
    */
   async saveGrid(
     tenantId: string,
     timetableId: string,
-    sectionId: string,
+    owner: { sectionId: string } | { classId: string },
     input: z.infer<typeof SaveGridBody>,
     principal: Principal,
     actor: Actor,
@@ -371,14 +371,21 @@ export class EntryService {
     return this.db.transaction(async (tx) => {
       const tt = await this.lockDraft(tx, tenantId, timetableId, principal);
       const settings = await readSettings(tx, tenantId, 'share');
-      const section = await loadSection(
-        tx,
-        tenantId,
-        sectionId,
-        principal,
-        'timetable.manage',
-        'share',
-      );
+      const sectionId = 'sectionId' in owner ? owner.sectionId : null;
+      const classId = 'classId' in owner ? owner.classId : null;
+      const ownerLabel = sectionId
+        ? await loadSection(tx, tenantId, sectionId, principal, 'timetable.manage', 'share').then(
+            (s) => `${s.className} ${s.code}`,
+          )
+        : await loadClassOwner(
+            tx,
+            tenantId,
+            classId!,
+            tt.academicYearId,
+            principal,
+            'timetable.manage',
+            'share',
+          ).then((c) => c.name);
       const wants: Want[] = [];
       const clears: { key: number; day: number; periodId: string; version?: number }[] = [];
       input.cells.forEach((c, key) => {
@@ -390,6 +397,7 @@ export class EntryService {
             day: c.day_of_week,
             periodId: c.period_id,
             sectionId,
+            ...(classId ? { classId } : {}),
             offeringId: c.subject_offering_id,
             ...(c.teacher_id ? { teacherId: c.teacher_id } : {}),
             ...(c.teaching_assignment_id ? { assignmentId: c.teaching_assignment_id } : {}),
@@ -401,7 +409,9 @@ export class EntryService {
         wants,
         removals: [],
         mode: 'upsert',
-        gridSectionId: sectionId,
+        gridOwner: sectionId
+          ? { sectionId, classId: null }
+          : { sectionId: null, classId: classId! },
         clears,
         replace: input.replace,
         periodIdsForClears: uniq(clears.map((c) => c.periodId)),
@@ -413,6 +423,7 @@ export class EntryService {
         : [];
       const summary = {
         section_id: sectionId,
+        class_id: classId,
         created: res.createdIds.length,
         updated: res.updatedIds.length,
         deleted: res.deletedIds.length,
@@ -436,7 +447,7 @@ export class EntryService {
           },
           after: {
             ...summary,
-            section: `${section.className} ${section.code}`,
+            section: ownerLabel,
             entries: after.slice(0, 200).map((r) => ({
               day_of_week: r.e.dayOfWeek,
               period: r.p.code,
@@ -448,7 +459,7 @@ export class EntryService {
           payload: { ...summary, replace: input.replace },
         });
       }
-      return { ...summary, section_id: sectionId };
+      return summary;
     });
   }
 
@@ -467,7 +478,8 @@ export class EntryService {
   private entryPayload(v: EntryView) {
     return {
       timetable_id: v.timetable_id,
-      section_id: v.section.id,
+      section_id: v.section?.id ?? null,
+      class_id: v.class.id,
       subject_offering_id: v.subject_offering_id,
       teacher_id: v.teacher.id,
       venue_id: v.venue?.id ?? null,
@@ -549,8 +561,10 @@ export class EntryService {
     tenantId: string,
     wants: Want[],
     extra: { periodIds: string[] },
+    yearId: string,
   ) {
     const sectionIds = uniq(wants.map((w) => w.sectionId));
+    const classIds = uniq(wants.map((w) => (w.sectionId ? null : w.classId)));
     const periodIds = uniq([...wants.map((w) => w.periodId), ...extra.periodIds]);
     const venueIds = uniq(wants.map((w) => w.venueId));
     const offeringIds = uniq(wants.map((w) => w.offeringId));
@@ -594,8 +608,35 @@ export class EntryService {
           )
           .for('share'),
       ),
+      classes: new Map(),
       activeByOffering: new Map(),
     };
+    if (classIds.length) {
+      const found = await tx
+        .select({
+          id: academicClasses.id,
+          name: academicClasses.name,
+          status: academicClasses.status,
+        })
+        .from(academicClasses)
+        .where(and(eq(academicClasses.tenantId, tenantId), inArray(academicClasses.id, classIds)))
+        .for('share');
+      if (found.length !== classIds.length) throw new NotFoundError('Class');
+      const split = await tx
+        .selectDistinct({ classId: academicSections.classId })
+        .from(academicSections)
+        .where(
+          and(
+            eq(academicSections.tenantId, tenantId),
+            eq(academicSections.academicYearId, yearId),
+            inArray(academicSections.classId, classIds),
+            inArray(academicSections.status, ['ACTIVE', 'DRAFT']),
+          ),
+        )
+        .for('share');
+      const withSections = new Set(split.map((x) => x.classId));
+      for (const c of found) refs.classes.set(c.id, { ...c, hasSections: withSections.has(c.id) });
+    }
     if (teacherIds.length) {
       const found = await tx
         .select({ id: teachers.id })
@@ -639,7 +680,8 @@ export class EntryService {
       wants: Want[];
       removals: Removal[];
       mode: 'create' | 'upsert';
-      gridSectionId?: string;
+      /** The section, or the class without sections, whose grid is saved. */
+      gridOwner?: { sectionId: string; classId: null } | { sectionId: null; classId: string };
       clears?: { key: number; day: number; periodId: string; version?: number }[];
       replace?: boolean;
       periodIdsForClears?: string[];
@@ -651,7 +693,10 @@ export class EntryService {
 
     // Rows that will be changed or removed must be in scope for the caller (out of scope = 404).
     const scopedSection = new Map<string, boolean>();
-    const inScope = async (sectionId: string) => {
+    const inScope = async (sectionId: string | null, classId: string | undefined) => {
+      // A class-level lesson: in scope for school-wide editors and ASSIGNED_CLASS grants.
+      if (!sectionId)
+        return sectionInScope(principal, 'timetable.manage', { id: '', classId: classId! });
       let ok = scopedSection.get(sectionId);
       if (ok === undefined) {
         const [s] = await tx
@@ -665,12 +710,19 @@ export class EntryService {
     };
 
     // 2. share-lock the references (404 for anything that is not this school's)
-    const refs = await this.loadRefs(tx, tenantId, o.wants, {
-      periodIds: o.periodIdsForClears ?? [],
-    });
-    for (const w of o.wants) if (!(await inScope(w.sectionId))) throw new NotFoundError('Section');
+    const refs = await this.loadRefs(
+      tx,
+      tenantId,
+      o.wants,
+      { periodIds: o.periodIdsForClears ?? [] },
+      tt.academicYearId,
+    );
+    for (const w of o.wants)
+      if (!(await inScope(w.sectionId, w.classId)))
+        throw new NotFoundError(w.sectionId ? 'Section' : 'Class');
     for (const r of o.removals)
-      if (!(await inScope(r.entry.sectionId))) throw new NotFoundError('Timetable entry');
+      if (!(await inScope(r.entry.sectionId, r.entry.classId)))
+        throw new NotFoundError('Timetable entry');
 
     // 3. lock the entries in the touched slots
     const slots = uniq([
@@ -697,8 +749,10 @@ export class EntryService {
           )
           .for('update')
       : [];
+    const g = o.gridOwner;
+    const gridKey = g ? ownerKey({ sectionId: g.sectionId, classId: g.classId ?? '' }) : null;
     const sectionEntries: EntryRow[] =
-      o.replace && o.gridSectionId
+      o.replace && g
         ? await tx
             .select()
             .from(timetableEntries)
@@ -706,7 +760,12 @@ export class EntryService {
               and(
                 eq(timetableEntries.tenantId, tenantId),
                 eq(timetableEntries.timetableId, tt.id),
-                eq(timetableEntries.sectionId, o.gridSectionId),
+                g.sectionId
+                  ? eq(timetableEntries.sectionId, g.sectionId)
+                  : and(
+                      isNull(timetableEntries.sectionId),
+                      eq(timetableEntries.classId, g.classId!),
+                    ),
                 eq(timetableEntries.status, 'ACTIVE'),
               ),
             )
@@ -720,7 +779,7 @@ export class EntryService {
     const bySectionSlot = new Map<string, EntryRow>();
     if (o.mode === 'upsert')
       for (const e of atSlots)
-        if (e.sectionId === o.gridSectionId) bySectionSlot.set(slotKey(e.dayOfWeek, e.periodId), e);
+        if (ownerKey(e) === gridKey) bySectionSlot.set(slotKey(e.dayOfWeek, e.periodId), e);
     for (const w of o.wants)
       if (o.mode === 'upsert') w.existing = bySectionSlot.get(slotKey(w.day, w.periodId));
 
@@ -789,10 +848,11 @@ export class EntryService {
       : [];
     const dayOf = new Map<string, Set<string>>();
     const sectionDay = (sec: { id: string; classId: string }) => {
-      let d = dayOf.get(sec.id);
+      const k = sec.id || `C${sec.classId}`;
+      let d = dayOf.get(k);
       if (!d) {
         d = new Set(periodsForSection(allPeriods, sec).map((p) => p.id));
-        dayOf.set(sec.id, d);
+        dayOf.set(k, d);
       }
       return d;
     };
@@ -808,7 +868,10 @@ export class EntryService {
             details: { entry_id: ex.id, current_version: ex.version },
           },
         );
-      const section = refs.sections.get(w.sectionId)!;
+      const section = w.sectionId ? refs.sections.get(w.sectionId)! : null;
+      const klass = w.sectionId ? null : refs.classes.get(w.classId!)!;
+      const ownerClassId = section ? section.classId : klass!.id;
+      const ownerName = section ? section.name : klass!.name;
       const period = refs.periods.get(w.periodId)!;
       const offering = refs.offerings.get(w.offeringId)!;
       const venue = w.venueId ? refs.venues.get(w.venueId)! : null;
@@ -899,26 +962,42 @@ export class EntryService {
       }
 
       // static rules
-      if (section.academicYearId !== tt.academicYearId)
+      if (section && section.academicYearId !== tt.academicYearId)
         err(
           w.key,
           'SECTION_WRONG_YEAR',
           'The section belongs to a different academic year than this timetable',
         );
-      else if (section.status !== 'ACTIVE' && section.status !== 'DRAFT')
+      else if (section && section.status !== 'ACTIVE' && section.status !== 'DRAFT')
         err(w.key, 'SECTION_NOT_SCHEDULABLE', 'Closed or archived sections cannot be scheduled', {
           details: { section_status: section.status },
+        });
+      else if (klass && klass.hasSections)
+        err(
+          w.key,
+          'CLASS_HAS_SECTIONS',
+          `${klass.name} has sections: schedule its lessons in each section instead`,
+          { details: { class_id: klass.id } },
+        );
+      else if (klass && klass.status !== 'ACTIVE')
+        err(w.key, 'CLASS_NOT_SCHEDULABLE', `${klass.name} is ${klass.status.toLowerCase()}`, {
+          details: { class_status: klass.status },
         });
       if (period.status !== 'ACTIVE')
         err(w.key, 'PERIOD_INACTIVE', 'The period is inactive', {
           details: { period_id: period.id },
         });
-      else if (!sectionDay(section).has(period.id))
+      else if (!sectionDay({ id: section?.id ?? '', classId: ownerClassId }).has(period.id))
         err(
           w.key,
           'PERIOD_NOT_IN_SCHEDULE',
-          `${period.name} is not one of the periods of ${section.name}'s school day`,
-          { details: { period_id: period.id, section_id: section.id } },
+          `${period.name} is not one of the periods of ${ownerName}'s school day`,
+          {
+            details: {
+              period_id: period.id,
+              ...(section ? { section_id: section.id } : { class_id: ownerClassId }),
+            },
+          },
         );
       else if (period.kind !== 'LESSON')
         err(
@@ -942,15 +1021,20 @@ export class EntryService {
           'The subject offering belongs to a different academic year',
         );
       else if (
-        offering.classId !== section.classId ||
-        (offering.sectionId !== null && offering.sectionId !== section.id)
+        offering.classId !== ownerClassId ||
+        (offering.sectionId !== null && offering.sectionId !== (section?.id ?? null))
       )
         err(
           w.key,
           'OFFERING_NOT_FOR_SECTION',
-          'The subject offering is not offered to this section',
+          section
+            ? 'The subject offering is not offered to this section'
+            : 'The subject offering is not offered to this class',
           {
-            details: { subject_offering_id: offering.id, section_id: section.id },
+            details: {
+              subject_offering_id: offering.id,
+              ...(section ? { section_id: section.id } : { class_id: ownerClassId }),
+            },
           },
         );
       if (venue && venue.status !== 'ACTIVE')
@@ -976,7 +1060,7 @@ export class EntryService {
     const occVenue = new Map<string, EntryRow | number>();
     for (const e of atSlots) {
       if (freed.has(e.id)) continue;
-      occSection.set(`${e.sectionId}:${slotKey(e.dayOfWeek, e.periodId)}`, e);
+      occSection.set(`${ownerKey(e)}:${slotKey(e.dayOfWeek, e.periodId)}`, e);
       occTeacher.set(`${e.teacherId}:${slotKey(e.dayOfWeek, e.periodId)}`, e);
       if (e.venueId) occVenue.set(`${e.venueId}:${slotKey(e.dayOfWeek, e.periodId)}`, e);
     }
@@ -991,11 +1075,12 @@ export class EntryService {
         const other = m.get(`${id}:${s}`);
         if (other !== undefined) clashRaw.push({ key: w.key, type, w, other });
       };
-      hit(occSection, w.sectionId, 'SECTION');
+      const wOwner = ownerKey({ sectionId: w.sectionId, classId: w.classId ?? '' });
+      hit(occSection, wOwner, 'SECTION');
       hit(occTeacher, a.teacherId, 'TEACHER');
       if (venueId) hit(occVenue, venueId, 'VENUE');
       if (!erroredKeys.has(w.key) && !clashRaw.some((c) => c.key === w.key)) {
-        occSection.set(`${w.sectionId}:${s}`, w.key);
+        occSection.set(`${wOwner}:${s}`, w.key);
         occTeacher.set(`${a.teacherId}:${s}`, w.key);
         if (venueId) occVenue.set(`${venueId}:${s}`, w.key);
         placed.push({ w, a, venueId });
@@ -1054,6 +1139,7 @@ export class EntryService {
       dayOfWeek: w.day,
       periodId: w.periodId,
       sectionId: w.sectionId,
+      classId: w.sectionId ? refs.sections.get(w.sectionId)!.classId : w.classId!,
       subjectOfferingId: w.offeringId,
       teachingAssignmentId: a.id,
       teacherId: a.teacherId,

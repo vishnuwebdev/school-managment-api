@@ -150,7 +150,7 @@ describe('teacher app API', () => {
     expect((await t.api.get(`/teacher/students/${mine.id}/attendance`)).status).toBe(200);
   });
 
-  it('shows my own records and leave', async () => {
+  it('shows my own records and attendance (leave is gone)', async () => {
     const t = await classTeacher(secB);
     const me = await t.api.get('/teacher/me');
     expect(me.status, JSON.stringify(me.body)).toBe(200);
@@ -158,15 +158,52 @@ describe('teacher app API', () => {
     for (const path of [
       '/teacher/qualifications',
       '/teacher/assignments',
-      '/teacher/leave/types',
-      '/teacher/leave/balance',
-      '/teacher/leave/requests',
       '/teacher/attendance-statuses',
       '/teacher/calendar',
-      `/teacher/my-attendance?month=${new Date().toISOString().slice(0, 7)}`,
     ]) {
       const res = await t.api.get(path);
       expect(res.status, `${path} ${JSON.stringify(res.body)}`).toBe(200);
     }
+    expect((await t.api.get('/teacher/leave/requests')).status).toBe(404);
+    const mine = await t.api.get(
+      `/teacher/my-attendance?month=${new Date().toISOString().slice(0, 7)}`,
+    );
+    expect(mine.status, JSON.stringify(mine.body)).toBe(200);
+  });
+  it('shows me the school calendar: holidays and the events meant for me', async () => {
+    const t = await classTeacher(secA);
+    const otherClass = (
+      await api.post('/academic-classes', { code: uniq('G'), name: 'Grade 11', sequence: 11 })
+    ).body.data.id as string;
+    const day = '2026-11-12';
+    const ev = async (title: string, audience: string, classIds?: string[]) => {
+      const res = await api.post('/calendar/events', {
+        type: 'EVENT',
+        title,
+        start_date: day,
+        end_date: day,
+        audience,
+        ...(classIds ? { class_ids: classIds } : {}),
+        staff_action: audience === 'STAFF' ? 'Bring your mark books' : undefined,
+        action_link: audience === 'STAFF' ? 'MARKS' : undefined,
+      });
+      expect(res.status, JSON.stringify(res.body)).toBe(201);
+      return res.body.data.id as string;
+    };
+    const everyone = await ev('Prize giving', 'ALL');
+    const staff = await ev('Staff meeting', 'STAFF');
+    const mineEv = await ev('Grade 8 outing', 'CLASSES', [classId]);
+    const notMine = await ev('Grade 11 outing', 'CLASSES', [otherClass]);
+
+    const res = await t.api.get(`/teacher/calendar?from=${day}&to=${day}`);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    const ids = res.body.data.events.map((e: { id: string }) => e.id);
+    expect(ids).toEqual(expect.arrayContaining([everyone, staff, mineEv]));
+    expect(ids).not.toContain(notMine);
+    const s = res.body.data.events.find((e: { id: string }) => e.id === staff);
+    expect(s.staff_action).toBe('Bring your mark books');
+    expect(s.action_link).toBe('MARKS');
+    expect(Array.isArray(res.body.data.holidays)).toBe(true);
+    expect(Array.isArray(res.body.data.weekly_off_days)).toBe(true);
   });
 });

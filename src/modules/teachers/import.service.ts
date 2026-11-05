@@ -28,12 +28,6 @@ const COLUMNS: { key: string; label: string; example: string; note: string }[] =
     example: '',
     note: 'Leave empty to number automatically',
   },
-  {
-    key: 'staff_type',
-    label: 'staff_type',
-    example: 'TEACHING',
-    note: 'TEACHING or NON_TEACHING (default TEACHING)',
-  },
   { key: 'gender', label: 'gender', example: 'FEMALE', note: 'MALE, FEMALE, OTHER or UNDISCLOSED' },
   { key: 'date_of_birth', label: 'date_of_birth', example: '1990-04-18', note: 'YYYY-MM-DD' },
   { key: 'email', label: 'email', example: 'asha@example.com', note: '' },
@@ -69,7 +63,7 @@ const COLUMNS: { key: string; label: string; example: string; note: string }[] =
   },
 ];
 const KEYS = new Set(COLUMNS.map((c) => c.key));
-const ENUM_FIELDS = ['staff_type', 'gender', 'employment_type'];
+const ENUM_FIELDS = ['gender', 'employment_type'];
 
 export interface ImportRow {
   row: number;

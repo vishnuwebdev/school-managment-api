@@ -7,6 +7,7 @@ import {
   rolePermissions,
   roleAssignments,
   roles,
+  classClassTeachers,
   sectionClassTeachers,
   subjectOfferings,
   teachers,
@@ -141,6 +142,21 @@ export class AuthorizationService {
         sectionIds.add(r.id);
         classIds.add(r.classId);
       }
+      // Class teacher of a whole class without sections: that class.
+      const ownClasses = await db
+        .select({ classId: classClassTeachers.classId })
+        .from(classClassTeachers)
+        .innerJoin(academicYears, eq(academicYears.id, classClassTeachers.academicYearId))
+        .where(
+          and(
+            eq(classClassTeachers.tenantId, teacher.tenantId),
+            eq(classClassTeachers.teacherId, teacher.id),
+            eq(classClassTeachers.status, 'ACTIVE'),
+            lte(classClassTeachers.startDate, today),
+            liveYear,
+          ),
+        );
+      for (const r of ownClasses) classIds.add(r.classId);
       const offerings = await db
         .select({
           sectionId: subjectOfferings.sectionId,

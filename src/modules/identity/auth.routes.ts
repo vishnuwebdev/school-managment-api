@@ -33,24 +33,61 @@ export function authRoutes(auth: AuthService) {
     defineRoute({
       method: 'post',
       path: '/auth/login',
-      summary: 'Sign in with email and password',
+      summary: 'Sign in with email (or mobile number, parent app) and password',
       tags: ['Auth'],
       access: 'public',
       rateLimit: 'auth',
-      body: z.object({
-        email: Email,
-        password: z.string().min(1).max(128),
-        /** Required when the user belongs to more than one school. */
-        membership_id: z.string().uuid().optional(),
-        device: Device,
-      }),
+      body: z
+        .object({
+          email: Email.optional(),
+          /** Parent app: the mobile number instead of the email ("+91 98765 43210" or "9876543210"). */
+          phone: z.string().trim().min(7).max(20).optional().openapi({ example: '+919876543210' }),
+          password: z.string().min(1).max(128),
+          /** Required when the user belongs to more than one school. */
+          membership_id: z.string().uuid().optional(),
+          device: Device,
+        })
+        .refine((b) => !!b.email !== !!b.phone, {
+          message: 'Send either email or phone',
+          path: ['email'],
+        }),
       response: z.object({ data: TokensResponse.extend({ membership: z.unknown() }) }),
       handler: async ({ body, req }) => ({
         data: await auth.login(
           {
             email: body.email,
+            phone: body.phone,
             password: body.password,
             membershipId: body.membership_id,
+            device: { deviceName: body.device?.device_name, deviceType: body.device?.device_type },
+          },
+          req.ctx.meta,
+        ),
+      }),
+    }),
+
+    defineRoute({
+      method: 'post',
+      path: '/auth/pin-login',
+      summary:
+        'Teacher app: sign in with the PIN set on this device. 401 INVALID_PIN (details.attempts_left), ' +
+        '401 PIN_NOT_SET (removed or reset by the school: sign in with the password), ' +
+        '403 PIN_LOCKED (too many wrong PINs).',
+      tags: ['Auth'],
+      access: 'public',
+      rateLimit: 'auth',
+      body: z.object({
+        /** Returned by PUT /teacher/pin and kept in the device's secure storage. */
+        pin_token: z.string().min(20).max(200),
+        pin: z.string().regex(/^\d{4}$/),
+        device: Device,
+      }),
+      response: z.object({ data: TokensResponse.extend({ membership: z.unknown() }) }),
+      handler: async ({ body, req }) => ({
+        data: await auth.loginWithPin(
+          {
+            pinToken: body.pin_token,
+            pin: body.pin,
             device: { deviceName: body.device?.device_name, deviceType: body.device?.device_type },
           },
           req.ctx.meta,

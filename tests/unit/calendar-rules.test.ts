@@ -38,3 +38,19 @@ describe('calendar rules', () => {
     expect(r.off_days.map((d) => d.name)).toEqual(['Diwali', 'Diwali', 'Sunday']);
   });
 });
+
+describe('staff-only and section closures', () => {
+  const retreat: HolidayLike = { id: 's', name: 'Staff retreat', startDate: '2026-11-11', endDate: '2026-11-11', audience: 'STAFF', classIds: null };
+  const trip: HolidayLike = { id: 't', name: '7B trip', startDate: '2026-11-13', endDate: '2026-11-13', audience: 'SECTIONS', classIds: ['c7'], sectionIds: ['s7b'] };
+  const list = [retreat, trip];
+  it('staff-only closure: staff off, students in school', () => {
+    expect(dayOff(DEFAULT_CALENDAR, list, '2026-11-11', { kind: 'staff' })?.name).toBe('Staff retreat');
+    expect(dayOff(DEFAULT_CALENDAR, list, '2026-11-11', { kind: 'class', classId: 'c7' })).toBeNull();
+  });
+  it('section closure: only that section is off', () => {
+    expect(dayOff(DEFAULT_CALENDAR, list, '2026-11-13', { kind: 'class', classId: 'c7', sectionId: 's7b' })?.name).toBe('7B trip');
+    expect(dayOff(DEFAULT_CALENDAR, list, '2026-11-13', { kind: 'class', classId: 'c7', sectionId: 's7a' })).toBeNull();
+    expect(dayOff(DEFAULT_CALENDAR, list, '2026-11-13', { kind: 'students' })).toBeNull();
+    expect(dayOff(DEFAULT_CALENDAR, list, '2026-11-13', { kind: 'staff' })).toBeNull();
+  });
+});

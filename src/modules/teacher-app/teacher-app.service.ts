@@ -1,8 +1,16 @@
 import { and, eq, inArray } from 'drizzle-orm';
 import type { Deps } from '../../container.js';
-import { teachers } from '../../db/schema/index.js';
+import {
+  academicSections,
+  academicYears,
+  teachers,
+  timetableDayOverrides,
+  users,
+  timetablePeriods,
+} from '../../db/schema/index.js';
 import type { Principal } from '../../platform/context.js';
-import { AuthorizationError } from '../../shared/errors.js';
+import { AuthorizationError, ValidationError } from '../../shared/errors.js';
+import { verifyPassword } from '../identity/password.js';
 import type { ReportService } from '../attendance/reports.service.js';
 import type { Caller } from '../attendance/support.js';
 import type { ClassTeacherService } from '../teachers/class-teachers.service.js';
@@ -63,6 +71,96 @@ export class TeacherAppService {
     };
   }
 
+  /** Forgot PIN while signed in: confirm it is me with my account password. */
+  async checkPassword(userId: string, password: string) {
+    const [u] = await this.deps.db
+      .select({ hash: users.passwordHash })
+      .from(users)
+      .where(eq(users.id, userId));
+    if (!u?.hash || !(await verifyPassword(u.hash, password)))
+      throw new ValidationError('That password isn’t right', {
+        location: 'body',
+        issues: [{ path: 'password', message: 'That password isn’t right' }],
+      });
+  }
+
+  /** Classes I teach or am class teacher of (active / upcoming years): who class events reach. */
+  async myClassIds(tenantId: string, principal: Principal): Promise<string[]> {
+    const mine = await this.classTeachers.mine(tenantId, principal);
+    return [
+      ...new Set([...mine.class_teacher_of, ...mine.teaching].map((x) => String(x.class_id))),
+    ];
+  }
+
+  /**
+   * Sections where I have a period on the timetable (live years): my own periods
+   * and weekday overrides that give me the period. A period for a whole class
+   * (no section) counts for every section of that class.
+   */
+  async scheduledSectionIds(tenantId: string, teacherId: string): Promise<Set<string>> {
+    const db = this.deps.db;
+    const live = inArray(academicYears.status, ['ACTIVE', 'UPCOMING']);
+    const fields = {
+      sectionId: timetablePeriods.academicSectionId,
+      classId: timetablePeriods.academicClassId,
+      yearId: timetablePeriods.academicYearId,
+    };
+    const [own, overridden] = await Promise.all([
+      db
+        .select(fields)
+        .from(timetablePeriods)
+        .innerJoin(academicYears, eq(academicYears.id, timetablePeriods.academicYearId))
+        .where(
+          and(
+            eq(timetablePeriods.tenantId, tenantId),
+            eq(timetablePeriods.teacherId, teacherId),
+            eq(timetablePeriods.status, 'ACTIVE'),
+            live,
+          ),
+        ),
+      db
+        .select(fields)
+        .from(timetableDayOverrides)
+        .innerJoin(
+          timetablePeriods,
+          and(
+            eq(timetablePeriods.tenantId, timetableDayOverrides.tenantId),
+            eq(timetablePeriods.id, timetableDayOverrides.periodId),
+          ),
+        )
+        .innerJoin(academicYears, eq(academicYears.id, timetablePeriods.academicYearId))
+        .where(
+          and(
+            eq(timetableDayOverrides.tenantId, tenantId),
+            eq(timetableDayOverrides.teacherId, teacherId),
+            eq(timetableDayOverrides.kind, 'LESSON'),
+            eq(timetablePeriods.status, 'ACTIVE'),
+            live,
+          ),
+        ),
+    ]);
+    const out = new Set<string>();
+    const wholeClasses: { classId: string; yearId: string }[] = [];
+    for (const r of [...own, ...overridden]) {
+      if (r.sectionId) out.add(r.sectionId);
+      else if (r.classId && r.yearId) wholeClasses.push({ classId: r.classId, yearId: r.yearId });
+    }
+    for (const w of wholeClasses) {
+      const secs = await db
+        .select({ id: academicSections.id })
+        .from(academicSections)
+        .where(
+          and(
+            eq(academicSections.tenantId, tenantId),
+            eq(academicSections.classId, w.classId),
+            eq(academicSections.academicYearId, w.yearId),
+          ),
+        );
+      for (const x of secs) out.add(x.id);
+    }
+    return out;
+  }
+
   /** Today: my lessons and the daily register state of every class I can mark. */
   async today(c: Caller, date: string | undefined) {
     const me = await this.myTeacher(c.tenantId, c.principal);
@@ -80,16 +178,22 @@ export class TeacherAppService {
   }
 
   /**
-   * My classes: every section I teach or am class teacher of, with today's
+   * My classes: sections where I have a timetable period or am class teacher, with today's
    * register state and the subjects I teach there.
    */
   async classes(c: Caller) {
-    await this.myTeacher(c.tenantId, c.principal);
-    const [mine, registers] = await Promise.all([
+    const me = await this.myTeacher(c.tenantId, c.principal);
+    const [mine, registers, scheduled] = await Promise.all([
       this.classTeachers.mine(c.tenantId, c.principal),
       this.attendanceReports.today(c, {}),
+      this.scheduledSectionIds(c.tenantId, me.id),
     ]);
     const classTeacherOf = new Set(mine.class_teacher_of.map((x) => x.section_id));
+    // Product owner, 26 Oct 2026: My classes lists only sections where I have a
+    // period on the timetable, plus the section I am class teacher of.
+    const shown = registers.sections.filter(
+      (s) => scheduled.has(String(s.section.id)) || classTeacherOf.has(String(s.section.id)),
+    );
     const subjectsFor = (sectionId: string, classId: string) =>
       mine.teaching
         .filter(
@@ -98,7 +202,7 @@ export class TeacherAppService {
         .map((t) => ({ assignment_id: t.assignment_id, role: t.role, subject: t.subject }));
     return {
       date: registers.date,
-      classes: registers.sections.map((s) => ({
+      classes: shown.map((s) => ({
         section: s.section,
         class: s.class,
         is_class_teacher: classTeacherOf.has(String(s.section.id)),

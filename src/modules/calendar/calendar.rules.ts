@@ -18,12 +18,20 @@ export type HolidayLike = {
   name: string;
   startDate: string;
   endDate: string;
-  audience: 'ALL' | 'STUDENTS' | 'CLASSES';
+  /** STAFF = only staff are off; SECTIONS = only the chosen sections are off. */
+  audience: 'ALL' | 'STAFF' | 'STUDENTS' | 'CLASSES' | 'SECTIONS';
   classIds: string[] | null;
+  sectionIds?: string[] | null;
 };
 
-/** Who the day is being checked for. `students` = the day is off for every student. */
-export type CalendarSubject = { kind: 'staff' } | { kind: 'class'; classId: string } | { kind: 'students' };
+/**
+ * Who the day is being checked for. `students` = the day is off for every
+ * student; `class` = one class, optionally one section of it.
+ */
+export type CalendarSubject =
+  | { kind: 'staff' }
+  | { kind: 'class'; classId: string; sectionId?: string }
+  | { kind: 'students' };
 
 export type DayOff = {
   date: string;
@@ -57,14 +65,20 @@ export function weeklyOff(settings: CalendarSettings, iso: string): string | nul
   return null;
 }
 
-/** Whether [h] makes the day off for [who]. Staff are off only for whole-school holidays. */
+/**
+ * Whether closing entry [h] makes the day off for [who]. Staff are off for
+ * whole-school and staff-only closures; students for whole-school and
+ * students closures, plus class / section closures that include them.
+ */
 export function holidayApplies(h: HolidayLike, who: CalendarSubject): boolean {
   if (h.audience === 'ALL') return true;
-  if (who.kind === 'staff') return false;
+  if (who.kind === 'staff') return h.audience === 'STAFF';
+  if (h.audience === 'STAFF') return false;
   if (h.audience === 'STUDENTS') return true;
-  // CLASSES: off only for those classes, not for the school as a whole.
+  // CLASSES / SECTIONS: off only for those, not for the school's students as a whole.
   if (who.kind === 'students') return false;
-  return (h.classIds ?? []).includes(who.classId);
+  if (h.audience === 'CLASSES') return (h.classIds ?? []).includes(who.classId);
+  return who.sectionId !== undefined && (h.sectionIds ?? []).includes(who.sectionId);
 }
 
 /** The reason [iso] is off for [who], or null when it is a working / school day. */

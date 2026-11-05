@@ -71,6 +71,16 @@ export async function seedCatalog(db: Database) {
       })),
     );
     if (deps.length) await tx.insert(featureDependencies).values(deps);
+    // Features dropped from the catalog (e.g. leave) are archived.
+    await tx
+      .update(features)
+      .set({ status: 'ARCHIVED' })
+      .where(
+        notInArray(
+          features.code,
+          FEATURES.map((f) => f.code as string),
+        ),
+      );
 
     // ---- Permissions (codes are never deleted; removed ones are archived)
     for (const [i, p] of PERMISSIONS.entries()) {

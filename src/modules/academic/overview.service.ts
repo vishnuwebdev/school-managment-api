@@ -7,6 +7,7 @@ import {
   academicYears,
   enrollments,
   OPEN_ENROLLMENT_STATUSES,
+  classClassTeachers,
   sectionClassTeachers,
   subjectOfferings,
   teachers,
@@ -91,6 +92,30 @@ export class ClassOverviewService {
         and(eq(sectionClassTeachers.tenantId, tenantId), eq(sectionClassTeachers.status, 'ACTIVE')),
       );
     const headOf = new Map(heads.map((h) => [h.sectionId, h]));
+    // Class teachers of whole classes without sections (this year).
+    const classHeads = await this.db
+      .select({
+        classId: classClassTeachers.classId,
+        teacherId: teachers.id,
+        first: teachers.firstName,
+        last: teachers.lastName,
+      })
+      .from(classClassTeachers)
+      .innerJoin(
+        teachers,
+        and(
+          eq(teachers.tenantId, classClassTeachers.tenantId),
+          eq(teachers.id, classClassTeachers.teacherId),
+        ),
+      )
+      .where(
+        and(
+          eq(classClassTeachers.tenantId, tenantId),
+          eq(classClassTeachers.academicYearId, year.id),
+          eq(classClassTeachers.status, 'ACTIVE'),
+        ),
+      );
+    const classHeadOf = new Map(classHeads.map((h) => [h.classId, h]));
 
     const subj = await this.db
       .select({ classId: subjectOfferings.classId, n: countDistinct(subjectOfferings.subjectId) })
@@ -176,6 +201,11 @@ export class ClassOverviewService {
         capacity,
         subjects: subjectsBy.get(c.id) ?? 0,
         sections_with_teacher: secs.filter((s) => s.class_teacher).length,
+        /** A class without sections: its own class teacher (null when it has sections or none is set). */
+        class_teacher: (() => {
+          const h = secs.length === 0 ? classHeadOf.get(c.id) : undefined;
+          return h ? { id: h.teacherId, name: `${h.first} ${h.last}`.trim() } : null;
+        })(),
       };
     });
     return {

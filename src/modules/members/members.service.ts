@@ -19,6 +19,9 @@ import { offsetOf, orderFrom, pageOf, type PaginationQuery } from '../../shared/
 import { adminCount, assertAdminSurvives, lockAdminScope } from '../access/admin-guard.js';
 import type { AuthorizationService } from '../access/authorization.service.js';
 import { assertCanGrant, assertScopeWithin, type RoleService } from '../access/roles.service.js';
+import { deletePin } from '../identity/app-pin.js';
+import { hashPassword } from '../identity/password.js';
+import { setPasswordByAdmin } from './credentials.js';
 import { assignRoles, inviteMember, queueInvitation, type AssignmentInput } from './invitations.js';
 
 interface AssignmentFact {
@@ -296,18 +299,83 @@ export class MemberService {
   // Commands
   // ---------------------------------------------------------------------------
 
+  /**
+   * Invite someone. With `password` (school logins only) the admin sets the
+   * password instead: the login is active at once and no email is sent.
+   */
   async invite(
     tenantId: string | null,
-    input: { email: string; firstName: string; lastName?: string; assignments: AssignmentInput[] },
+    input: {
+      email: string;
+      firstName: string;
+      lastName?: string;
+      assignments: AssignmentInput[];
+      password?: string;
+    },
     principal: Principal,
     actor: Actor,
   ) {
+    const { password, ...invite } = input;
+    if (password && !tenantId)
+      throw new BusinessRuleError('OPERATION_NOT_ALLOWED', 'Platform logins are invited by email');
+    const passwordHash = password ? await hashPassword(password) : null;
     const res = await this.deps.db.transaction(async (tx) => {
-      await this.assertCanAssign(tx, tenantId, principal, input.assignments);
-      return inviteMember(this.deps, tx, { ...input, tenantId }, actor);
+      await this.assertCanAssign(tx, tenantId, principal, invite.assignments);
+      const created = await inviteMember(this.deps, tx, { ...invite, tenantId }, actor);
+      // The queued invitation is revoked in this transaction, so its email is never sent.
+      if (passwordHash)
+        await setPasswordByAdmin(
+          this.deps,
+          tx,
+          {
+            tenantId: tenantId!,
+            membershipId: created.membershipId,
+            passwordHash,
+            reason: 'Login created with a password set by the school',
+          },
+          actor,
+        );
+      return created;
     });
     await this.authz.invalidateTenant(tenantId);
     return this.get(tenantId, res.membershipId);
+  }
+
+  /**
+   * A school admin sets the password of a school login (e.g. for the teacher
+   * app). Only for accounts used at this school alone; see assertAccountManagedBy.
+   */
+  async setPassword(
+    tenantId: string,
+    membershipId: string,
+    password: string,
+    reason: string,
+    principal: Principal,
+    actor: Actor,
+  ) {
+    if (membershipId === principal.membershipId)
+      throw new BusinessRuleError(
+        'OPERATION_NOT_ALLOWED',
+        'Use Change password to change your own password',
+      );
+    const passwordHash = await hashPassword(password);
+    await this.deps.db.transaction(async (tx) => {
+      const member = await this.get(tenantId, membershipId, tx);
+      await this.assertCanManage(
+        tx,
+        tenantId,
+        principal,
+        member.roles.map((r) => r.role_id),
+      );
+      await setPasswordByAdmin(
+        this.deps,
+        tx,
+        { tenantId, membershipId, passwordHash, reason },
+        actor,
+      );
+    });
+    await this.authz.invalidateTenant(tenantId);
+    return this.get(tenantId, membershipId);
   }
 
   async resendInvitation(
@@ -453,6 +521,8 @@ export class MemberService {
         );
       await assertAdminSurvives(tx, tenantId, adminsBefore);
       await this.revokeSessions(tx, membershipId, 'MEMBERSHIP_REVOKED');
+      // A re-invited login reuses the membership, so the old app PIN must not survive.
+      if (tenantId) await deletePin(tx, tenantId, membershipId);
       await recordAudit(tx, actor, {
         tenantId,
         action: 'MEMBER_REVOKED',

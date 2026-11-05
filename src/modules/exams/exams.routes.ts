@@ -2,18 +2,24 @@ import type { Request } from 'express';
 import { defineRoute } from '../../http/route.js';
 import { actorFrom } from '../../platform/context.js';
 import { GRADE_SCALE, type ExamService } from './exams.service.js';
+import type { ExamTimetableService } from './timetable.service.js';
 import {
   AddClassesBody,
   ClassParams,
   CreateExamBody,
   CreatePaperBody,
+  DutiesQuery,
   ExamListQuery,
   IdParams,
   PaperListQuery,
   PaperParams,
+  PaperScheduleBody,
   PublishBody,
   ResultsQuery,
+  ReturnMarksBody,
   SaveMarksBody,
+  SectionParams,
+  SectionScheduleBody,
   StudentParams,
   UpdateExamBody,
   UpdatePaperBody,
@@ -26,7 +32,7 @@ const ctx = (req: Request) => ({
 
 const TAG = ['School · Examinations'];
 
-export function examRoutes(svc: ExamService) {
+export function examRoutes(svc: ExamService, tt: ExamTimetableService) {
   return [
     defineRoute({
       method: 'get',
@@ -46,6 +52,89 @@ export function examRoutes(svc: ExamService) {
       access: 'tenant',
       permissions: ['exams.read'],
       handler: async () => ({ data: GRADE_SCALE }),
+    }),
+    defineRoute({
+      method: 'get',
+      path: '/exams/my-duties',
+      summary: 'The signed-in teacher’s exam duties: sittings to invigilate and papers to mark',
+      tags: TAG,
+      access: 'tenant',
+      permissions: ['exams.read'],
+      query: DutiesQuery,
+      handler: async ({ query, req }) => ({
+        data: await tt.myDuties(ctx(req).tenantId, req.ctx.principal!, query),
+      }),
+    }),
+    defineRoute({
+      method: 'get',
+      path: '/exams/:id/timetable',
+      summary:
+        'The exam timetable: every paper with its date, time, venue, invigilators, markers and section sittings',
+      tags: TAG,
+      access: 'tenant',
+      permissions: ['exams.read'],
+      params: IdParams,
+      handler: async ({ params, req }) => ({
+        data: await tt.timetable(ctx(req).tenantId, params.id),
+      }),
+    }),
+    defineRoute({
+      method: 'put',
+      path: '/exams/papers/:paper_id/schedule',
+      summary:
+        'Schedule a paper for its class: date, start/end time, venue, invigilators and markers. Refused on a clash (teacher, class/section or venue); lesson clashes come back as warnings',
+      tags: TAG,
+      access: 'tenant',
+      permissions: ['exams.manage'],
+      params: PaperParams,
+      body: PaperScheduleBody,
+      handler: async ({ params, body, req }) => {
+        const c = ctx(req);
+        return { data: await tt.setSchedule(c.tenantId, params.paper_id, body, c.actor) };
+      },
+    }),
+    defineRoute({
+      method: 'put',
+      path: '/exams/papers/:paper_id/sections/:section_id/schedule',
+      summary:
+        'Let one section sit a paper differently: its own date, time, venue or invigilators (null = same as the class)',
+      tags: TAG,
+      access: 'tenant',
+      permissions: ['exams.manage'],
+      params: SectionParams,
+      body: SectionScheduleBody,
+      handler: async ({ params, body, req }) => {
+        const c = ctx(req);
+        return {
+          data: await tt.setSectionSchedule(
+            c.tenantId,
+            params.paper_id,
+            params.section_id,
+            body,
+            c.actor,
+          ),
+        };
+      },
+    }),
+    defineRoute({
+      method: 'delete',
+      path: '/exams/papers/:paper_id/sections/:section_id/schedule',
+      summary: 'The section sits the paper with its class again',
+      tags: TAG,
+      access: 'tenant',
+      permissions: ['exams.manage'],
+      params: SectionParams,
+      handler: async ({ params, req }) => {
+        const c = ctx(req);
+        return {
+          data: await tt.clearSectionSchedule(
+            c.tenantId,
+            params.paper_id,
+            params.section_id,
+            c.actor,
+          ),
+        };
+      },
     }),
     defineRoute({
       method: 'post',
@@ -207,7 +296,31 @@ export function examRoutes(svc: ExamService) {
       body: SaveMarksBody,
       handler: async ({ params, body, req }) => {
         const c = ctx(req);
+        await tt.assertCanEnterMarks(c.tenantId, req.ctx.principal!, params.paper_id);
         return { data: await svc.saveMarks(c.tenantId, params.paper_id, body, c.actor) };
+      },
+    }),
+    defineRoute({
+      method: 'post',
+      path: '/exams/papers/:paper_id/sections/:section_id/return',
+      summary:
+        'Send a section’s handed-in marks back to the teacher (they can edit and hand them in again)',
+      tags: TAG,
+      access: 'tenant',
+      permissions: ['exams.manage'],
+      params: SectionParams,
+      body: ReturnMarksBody,
+      handler: async ({ params, body, req }) => {
+        const c = ctx(req);
+        return {
+          data: await svc.returnSection(
+            c.tenantId,
+            params.paper_id,
+            params.section_id,
+            body.note ?? null,
+            c.actor,
+          ),
+        };
       },
     }),
     defineRoute({

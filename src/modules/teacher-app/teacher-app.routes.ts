@@ -5,30 +5,29 @@ import { actorFrom } from '../../platform/context.js';
 import { PaginationQuery } from '../../shared/pagination.js';
 import {
   MarkAllBody,
+  RequestCorrectionBody,
   SaveRecordsBody,
   SessionCommandBody,
   StudentHistoryQuery,
 } from '../attendance/attendance.schemas.js';
 import type { AttendanceConfigService } from '../attendance/config.service.js';
+import type { CorrectionService } from '../attendance/corrections.service.js';
 import type { ReportService } from '../attendance/reports.service.js';
 import type { SessionService } from '../attendance/sessions.service.js';
 import { schoolToday, type Caller } from '../attendance/support.js';
 import { HolidayListQuery } from '../calendar/calendar.schemas.js';
 import type { CalendarService } from '../calendar/calendar.service.js';
+import { PinSchema, type AppPinService } from '../identity/app-pin.js';
 import type { ExamService } from '../exams/exams.service.js';
 import type { EnrollmentService } from '../students/enrollments.service.js';
 import type { GuardianService } from '../students/guardians.service.js';
 import type { StudentService } from '../students/students.service.js';
 import type { AssignmentService } from '../teachers/assignments.service.js';
-import {
-  AttendanceMonthQuery,
-  CancelLeaveBody,
-  CreateLeaveBody,
-  LeaveListQuery,
-} from '../teachers/leave.schemas.js';
-import type { LeaveService } from '../teachers/leave.service.js';
 import type { QualificationService } from '../teachers/qualifications.service.js';
-import type { StaffAttendanceService } from '../teachers/staff-attendance.service.js';
+import type { StaffDocumentService } from '../teachers/documents.service.js';
+import { fileHeaders } from '../files/files.service.js';
+import { AttendanceMonthQuery } from '../teachers/teacher-attendance.schemas.js';
+import type { TeacherAttendanceService } from '../teachers/teacher-attendance.service.js';
 import type { TeacherService } from '../teachers/teachers.service.js';
 import type { ViewService } from '../timetable/views.service.js';
 import type { TeacherAppService } from './teacher-app.service.js';
@@ -46,6 +45,10 @@ const TAG = ['Teacher app'];
 
 const IsoDate = z.iso.date();
 const IdParams = z.object({ id: z.uuid() });
+const DocParams = z.object({ docId: z.uuid() });
+const ReportQuery = z.object({
+  month: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/, 'Use YYYY-MM'),
+});
 const SectionParams = z.object({ sectionId: z.uuid() });
 const SessionParams = z.object({ sessionId: z.uuid() });
 const DateQuery = z.object({ date: IsoDate.optional() });
@@ -53,31 +56,44 @@ const OpenRegisterBody = z.object({ date: IsoDate.optional() });
 const RosterQuery = PaginationQuery.extend({
   page_size: z.coerce.number().int().min(1).max(100).default(100),
 });
-const MyLeaveQuery = LeaveListQuery.omit({ teacher_id: true });
-const MyLeaveBody = CreateLeaveBody.omit({ teacher_id: true });
-const MyBalanceQuery = z.object({
-  year: z.coerce.number().int().min(2000).max(2100).optional(),
-});
 const MyAssignmentsQuery = PaginationQuery.extend({
   status: z.enum(['ACTIVE', 'ENDED', 'CANCELLED']).optional(),
 });
 
+const VerifyPinBody = z.object({
+  pin_token: z.string().min(20).max(200),
+  pin: z.string().regex(/^\d{4}$/),
+});
+const VerifyPasswordBody = z.object({ password: z.string().min(1).max(200) });
+
+const SetPinBody = z.object({
+  pin: PinSchema,
+  device: z
+    .object({
+      device_name: z.string().max(100).optional(),
+      device_type: z.enum(['android', 'ios', 'other']).optional(),
+    })
+    .optional(),
+});
+
 export interface TeacherAppDeps {
   app: TeacherAppService;
+  pins: AppPinService;
   teachers: TeacherService;
   qualifications: QualificationService;
   assignments: AssignmentService;
   attendanceConfig: AttendanceConfigService;
   attendanceSessions: SessionService;
   attendanceReports: ReportService;
+  attendanceCorrections: CorrectionService;
+  staffDocuments: StaffDocumentService;
   timetableViews: ViewService;
   calendar: CalendarService;
   students: StudentService;
   guardians: GuardianService;
   enrollments: EnrollmentService;
   exams: ExamService;
-  leave: LeaveService;
-  staffAttendance: StaffAttendanceService;
+  teacherAttendance: TeacherAttendanceService;
   db: Parameters<typeof schoolToday>[0];
   clock: Parameters<typeof schoolToday>[2];
 }
@@ -107,6 +123,95 @@ export function teacherAppRoutes(d: TeacherAppDeps) {
         data: await d.teachers.get(tid(req), await myId(req), me(req)),
       }),
     }),
+    // ---- Sign-in PIN ----------------------------------------------------------------
+    defineRoute({
+      method: 'get',
+      path: '/teacher/pin',
+      summary: 'Whether I have an app sign-in PIN (NONE, SET or LOCKED)',
+      tags: TAG,
+      access: 'tenant',
+      permissions: [APP],
+      handler: async ({ req }) => {
+        await myId(req);
+        return { data: await d.pins.status(tid(req), me(req).membershipId) };
+      },
+    }),
+    defineRoute({
+      method: 'put',
+      path: '/teacher/pin',
+      summary:
+        'Set or replace my app sign-in PIN. Returns `pin_token`: keep it in secure storage and ' +
+        'send it with the PIN to POST /auth/pin-login. A previous PIN stops working.',
+      tags: TAG,
+      access: 'tenant',
+      rateLimit: 'auth',
+      permissions: [APP],
+      body: SetPinBody,
+      handler: async ({ body, req }) => {
+        await myId(req);
+        return {
+          data: await d.pins.set(
+            {
+              tenantId: tid(req),
+              membershipId: me(req).membershipId,
+              userId: me(req).userId,
+              pin: body.pin,
+              device: {
+                deviceName: body.device?.device_name,
+                deviceType: body.device?.device_type,
+              },
+            },
+            actorFrom(req.ctx),
+          ),
+        };
+      },
+    }),
+    defineRoute({
+      method: 'post',
+      path: '/teacher/pin/verify',
+      summary:
+        'Check my current PIN (Change PIN). 401 INVALID_PIN (details.attempts_left), 401 PIN_NOT_SET, 403 PIN_LOCKED',
+      tags: TAG,
+      access: 'tenant',
+      rateLimit: 'auth',
+      permissions: [APP],
+      body: VerifyPinBody,
+      handler: async ({ body, req }) => {
+        await myId(req);
+        await d.pins.verifyMine(body.pin_token, body.pin, me(req).membershipId);
+        return { data: { ok: true } };
+      },
+    }),
+    defineRoute({
+      method: 'post',
+      path: '/teacher/verify-password',
+      summary:
+        'Confirm it is me with my account password (Forgot PIN while signed in). 422 when wrong',
+      tags: TAG,
+      access: 'tenant',
+      rateLimit: 'auth',
+      permissions: [APP],
+      body: VerifyPasswordBody,
+      handler: async ({ body, req }) => {
+        await myId(req);
+        await d.app.checkPassword(me(req).userId, body.password);
+        return { data: { ok: true } };
+      },
+    }),
+    defineRoute({
+      method: 'delete',
+      path: '/teacher/pin',
+      summary: 'Turn PIN sign-in off (deletes my PIN)',
+      tags: TAG,
+      access: 'tenant',
+      permissions: [APP],
+      status: 204,
+      handler: async ({ req }) => {
+        await myId(req);
+        await d.pins.remove(tid(req), me(req).membershipId, actorFrom(req.ctx));
+      },
+    }),
+
     defineRoute({
       method: 'get',
       path: '/teacher/today',
@@ -132,27 +237,32 @@ export function teacherAppRoutes(d: TeacherAppDeps) {
     defineRoute({
       method: 'get',
       path: '/teacher/calendar',
-      summary: 'School calendar for a date range (holidays; events follow in phase C)',
+      summary:
+        'School calendar for a date range: holidays, weekly off days, and the events, exams and ' +
+        'meetings I can see (everyone, staff, all students, or a class I teach)',
       tags: TAG,
       access: 'tenant',
       permissions: [APP, 'academics.read'],
       query: HolidayListQuery,
       handler: async ({ query, req }) => {
         await myId(req);
-        return { data: { holidays: await d.calendar.listHolidays(tid(req), query) } };
-      },
-    }),
-    defineRoute({
-      method: 'get',
-      path: '/teacher/my-attendance',
-      summary: 'My own attendance for a month, as marked by the office',
-      tags: TAG,
-      access: 'tenant',
-      permissions: [APP, 'teachers.read'],
-      query: AttendanceMonthQuery,
-      handler: async ({ query, req }) => {
-        await myId(req);
-        return { data: await d.staffAttendance.mine(tid(req), query.month, me(req)) };
+        const [holidays, settings, classIds] = await Promise.all([
+          d.calendar.listHolidays(tid(req), query),
+          d.calendar.getSettings(tid(req)),
+          d.app.myClassIds(tid(req), me(req)),
+        ]);
+        return {
+          data: {
+            holidays,
+            weekly_off_days: settings.weekly_off_days,
+            off_saturdays: settings.off_saturdays,
+            events: await d.calendar.eventsForTeacher(
+              tid(req),
+              { from: query.from, to: query.to },
+              classIds,
+            ),
+          },
+        };
       },
     }),
 
@@ -329,74 +439,56 @@ export function teacherAppRoutes(d: TeacherAppDeps) {
       },
     }),
 
-    // ---- Leave ------------------------------------------------------------------------
-    defineRoute({
-      method: 'get',
-      path: '/teacher/leave/types',
-      summary: 'Leave types I can request',
-      tags: TAG,
-      access: 'tenant',
-      permissions: [APP, 'leave.read'],
-      handler: async ({ req }) => {
-        await myId(req);
-        return { data: await d.leave.listTypes(tid(req), false) };
-      },
-    }),
-    defineRoute({
-      method: 'get',
-      path: '/teacher/leave/balance',
-      summary: 'My leave balance per type (quota, approved, pending, left)',
-      tags: TAG,
-      access: 'tenant',
-      permissions: [APP, 'leave.read'],
-      query: MyBalanceQuery,
-      handler: async ({ query, req }) => ({
-        data: await d.leave.balance(tid(req), { ...query, teacher_id: await myId(req) }, me(req)),
-      }),
-    }),
-    defineRoute({
-      method: 'get',
-      path: '/teacher/leave/requests',
-      summary: 'My leave requests (filter by status and dates)',
-      tags: TAG,
-      access: 'tenant',
-      permissions: [APP, 'leave.read'],
-      query: MyLeaveQuery,
-      handler: async ({ query, req }) =>
-        d.leave.list(tid(req), { ...query, teacher_id: await myId(req) }, me(req)),
-    }),
     defineRoute({
       method: 'post',
-      path: '/teacher/leave/requests',
-      summary: 'Request leave for myself',
+      path: '/teacher/records/:id/corrections',
+      summary:
+        'Correct one student’s mark on a finalised register (applied at once or sent to the office, per school settings)',
       tags: TAG,
       access: 'tenant',
-      permissions: [APP, 'leave.request'],
-      body: MyLeaveBody,
-      status: 201,
-      handler: async ({ body, req }) => {
-        await myId(req);
-        return { data: await d.leave.create(tid(req), body, me(req), actorFrom(req.ctx)) };
-      },
-    }),
-    defineRoute({
-      method: 'post',
-      path: '/teacher/leave/requests/:id/cancel',
-      summary: 'Cancel one of my pending (or not-yet-started approved) requests',
-      tags: TAG,
-      access: 'tenant',
-      permissions: [APP, 'leave.read'],
+      permissions: [APP, 'attendance.correct'],
       params: IdParams,
-      body: CancelLeaveBody,
+      body: RequestCorrectionBody,
+      status: 201,
       handler: async ({ params, body, req }) => {
         await myId(req);
+        return { data: await d.attendanceCorrections.request(caller(req), params.id, body) };
+      },
+    }),
+    defineRoute({
+      method: 'get',
+      path: '/teacher/classes/:sectionId/report',
+      summary: 'Monthly attendance report of one of my classes: per day, per student and totals',
+      tags: TAG,
+      access: 'tenant',
+      permissions: [APP, 'attendance.read'],
+      params: SectionParams,
+      query: ReportQuery,
+      handler: async ({ params, query, req }) => {
+        await myId(req);
         return {
-          data: await d.leave.cancel(tid(req), params.id, body.reason, me(req), actorFrom(req.ctx)),
+          data: await d.attendanceReports.monthly(caller(req), {
+            section_id: params.sectionId,
+            month: query.month,
+          }),
         };
       },
     }),
 
     // ---- My records -------------------------------------------------------------------
+    defineRoute({
+      method: 'get',
+      path: '/teacher/my-attendance',
+      summary: 'My own attendance for a month, as marked by the office',
+      tags: TAG,
+      access: 'tenant',
+      permissions: [APP, 'teachers.read'],
+      query: AttendanceMonthQuery,
+      handler: async ({ query, req }) => {
+        await myId(req);
+        return { data: await d.teacherAttendance.mine(tid(req), query.month, me(req)) };
+      },
+    }),
     defineRoute({
       method: 'get',
       path: '/teacher/assignments',
@@ -407,6 +499,37 @@ export function teacherAppRoutes(d: TeacherAppDeps) {
       query: MyAssignmentsQuery,
       handler: async ({ query, req }) =>
         d.assignments.list(tid(req), { ...query, teacher_id: await myId(req) }, me(req)),
+    }),
+    defineRoute({
+      method: 'get',
+      path: '/teacher/documents',
+      summary: 'My documents on file with the office (required and optional, what is missing)',
+      tags: TAG,
+      access: 'tenant',
+      permissions: [APP, 'teachers.read'],
+      handler: async ({ req }) => ({
+        data: await d.staffDocuments.list(tid(req), await myId(req), me(req), 'teachers.read'),
+      }),
+    }),
+    defineRoute({
+      method: 'get',
+      path: '/teacher/documents/:docId/file',
+      summary: 'Download one of my documents',
+      tags: TAG,
+      access: 'tenant',
+      permissions: [APP, 'teachers.read'],
+      params: DocParams,
+      handler: async ({ params, req, res }) => {
+        const f = await d.staffDocuments.download(
+          tid(req),
+          await myId(req),
+          params.docId,
+          me(req),
+          'teachers.read',
+        );
+        res.status(200).set(fileHeaders(f)).end(f.data);
+        return undefined;
+      },
     }),
     defineRoute({
       method: 'get',
