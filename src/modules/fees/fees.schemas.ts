@@ -307,7 +307,7 @@ export const AllocationRequest = z.discriminatedUnion('mode', [
       .min(1)
       .max(100)
       .refine((a) => new Set(a.map((x) => x.fee_demand_id)).size === a.length, {
-        message: 'A demand can appear only once',
+        message: 'An invoice can appear only once',
       }),
   }),
 ]);

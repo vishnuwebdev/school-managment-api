@@ -18,7 +18,7 @@ export const GradeFeesBody = z.object({
     .min(1)
     .max(60)
     .refine((f) => new Set(f.map((x) => x.class_id)).size === f.length, {
-      message: "A grade can appear only once",
+      message: "A class can appear only once",
     }),
   /** Re-split what learners already billed still owe, at the new fee (default true). */
   update_existing: z.boolean().default(true),

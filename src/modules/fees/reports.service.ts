@@ -909,7 +909,7 @@ export class FeeReportService {
             'Student',
             'Class',
             'Section',
-            'Open demands',
+            'Open invoices',
             'Outstanding',
             'Overdue',
             'Oldest due date',
@@ -951,7 +951,7 @@ export class FeeReportService {
         tooLarge(rows.length);
         lines.push(
           csvLine([
-            'Demand number',
+            'Invoice number',
             'Student number',
             'Student',
             'Category',
@@ -1016,7 +1016,7 @@ export class FeeReportService {
         tooLarge(rows.length);
         lines.push(
           csvLine([
-            'Demand number',
+            'Invoice number',
             'Student number',
             'Student',
             'Category',
@@ -1179,7 +1179,7 @@ export class FeeReportService {
             'Status',
             'Student number',
             'Student',
-            'Demand number',
+            'Invoice number',
             'Value type',
             'Value',
             'Applied amount',

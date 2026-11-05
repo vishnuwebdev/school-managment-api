@@ -998,7 +998,7 @@ export class AssignmentService {
       if (a.status !== "ACTIVE")
         throw businessRule(
           "ASSIGNMENT_NOT_ACTIVE",
-          "Demands can only be generated for an active assignment",
+          "Invoices can only be generated for an active assignment",
           {},
           "OPERATION_NOT_ALLOWED",
         );

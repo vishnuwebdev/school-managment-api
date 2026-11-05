@@ -518,20 +518,20 @@ export class PaymentService {
     const seen = new Set<string>();
     for (const item of planned) {
       const d = locked.get(item.demandId);
-      if (!d) throw new NotFoundError('Fee demand');
+      if (!d) throw new NotFoundError('Fee invoice');
       if (seen.has(d.id)) continue;
       seen.add(d.id);
       if (d.studentId !== payment.studentId)
         throw businessRule(
           'STUDENT_MISMATCH',
-          'A payment can only be allocated to demands of the same student',
+          'A payment can only be allocated to invoices of the same student',
           { fee_demand_id: d.id },
           'OPERATION_NOT_ALLOWED',
         );
       if (d.currency !== payment.currency)
         throw businessRule(
           'CURRENCY_MISMATCH',
-          'The demand is in another currency than the payment',
+          'The invoice is in another currency than the payment',
           { fee_demand_id: d.id },
           'OPERATION_NOT_ALLOWED',
         );
@@ -539,8 +539,8 @@ export class PaymentService {
         throw businessRule(
           d.status === 'DRAFT' ? 'DEMAND_NOT_ISSUED' : 'DEMAND_NOT_PAYABLE',
           d.status === 'DRAFT'
-            ? 'The demand has not been issued yet'
-            : 'The demand cannot receive payments in its current status',
+            ? 'The invoice has not been issued yet'
+            : 'The invoice cannot receive payments in its current status',
           { fee_demand_id: d.id, demand_status: d.status },
           'OPERATION_NOT_ALLOWED',
         );
@@ -548,7 +548,7 @@ export class PaymentService {
       if (item.amount > out)
         throw businessRule(
           'EXCEEDS_OUTSTANDING',
-          'The allocation is more than the demand still owes',
+          'The allocation is more than the invoice still owes',
           {
             fee_demand_id: d.id,
             outstanding_amount: fromMinor(out),
@@ -658,7 +658,7 @@ export class PaymentService {
             : await this.candidateDemandIds(tx, c.tenantId, p.studentId, req.demand_ids);
         const locked = await lockDemands(tx, c.tenantId, [...new Set(ids)]);
         if (req.mode === 'MANUAL')
-          for (const id of ids) if (!locked.has(id)) throw new NotFoundError('Fee demand');
+          for (const id of ids) if (!locked.has(id)) throw new NotFoundError('Fee invoice');
         await this.allocateLocked(tx, c, p, locked, req, {
           today: await schoolToday(tx, c.tenantId, this.deps.clock),
           now: this.deps.clock.now(),
@@ -886,7 +886,7 @@ export class PaymentService {
                   );
             locked = await lockDemands(tx, c.tenantId, [...new Set(ids)]);
             if (input.allocation.mode === 'MANUAL')
-              for (const did of ids) if (!locked.has(did)) throw new NotFoundError('Fee demand');
+              for (const did of ids) if (!locked.has(did)) throw new NotFoundError('Fee invoice');
           }
           const number = await nextNumber(tx, c.tenantId, 'PAY', now);
           id = uuidv7();

@@ -389,7 +389,7 @@ export async function loadDemand(
       ),
     );
   const [row] = await (lock ? q.for(lock) : q);
-  if (!row) throw new NotFoundError("Fee demand");
+  if (!row) throw new NotFoundError("Fee invoice");
   return row;
 }
 

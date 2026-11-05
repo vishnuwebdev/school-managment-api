@@ -389,7 +389,7 @@ export class LearnerFeesService {
               eq(academicClasses.id, f.class_id),
             ),
           );
-        if (!klass) throw new NotFoundError("Grade");
+        if (!klass) throw new NotFoundError("Class");
         const old = current.get(klass.id);
         if (old && toMinor(old.amount) === toMinor(f.annual_fee)) {
           summary.unchanged++;
@@ -451,7 +451,7 @@ export class LearnerFeesService {
               plan: a.paymentPlan ?? ctx.settings.defaultPaymentPlan,
               year,
               from: ctx.today > year.startDate ? ctx.today : year.startDate,
-              reason: `Grade fee changed to ${f.annual_fee}`,
+              reason: `Class fee changed to ${f.annual_fee}`,
             });
             summary.learners_resplit++;
           }
@@ -484,7 +484,7 @@ export class LearnerFeesService {
               plan: a.paymentPlan!,
               year,
               from: scheduleStart(year, e.startDate),
-              reason: "Grade fee set",
+              reason: "Class fee set",
             });
             summary.learners_billed++;
           }

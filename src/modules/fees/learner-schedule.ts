@@ -373,7 +373,7 @@ export async function rebuildGradeSchedule(
       status: "CANCELLED",
       cancelledAt: ctx.now,
       cancelledBy: ctx.actor.userId,
-      cancelReason: "Moved to another grade",
+      cancelReason: "Moved to another class",
     })
     .where(
       and(
