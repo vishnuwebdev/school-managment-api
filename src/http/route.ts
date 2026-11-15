@@ -22,6 +22,8 @@ export interface RouteDef<P extends AnyObject, Q extends AnyObject, B extends z.
   access: Access;
   /** All listed permissions are required. Their features are entitlement-checked automatically. */
   permissions?: string[];
+  /** Extra features the school must have (beyond the features of `permissions`). */
+  features?: string[];
   params?: P;
   query?: Q;
   body?: B;
@@ -40,7 +42,7 @@ export interface RouteDef<P extends AnyObject, Q extends AnyObject, B extends z.
 export interface Pipeline {
   authenticate: RequestHandler;
   resolveContext: (access: Access) => RequestHandler;
-  authorize: (permissions: string[]) => RequestHandler;
+  authorize: (permissions: string[], features?: string[]) => RequestHandler;
   authRateLimit: RequestHandler;
 }
 
@@ -85,7 +87,7 @@ export function mountRoutes(router: Router, routes: RouteDef<any, any, any>[], p
     if (def.rateLimit === 'auth') chain.push(pipeline.authRateLimit);
     if (def.access !== 'public') {
       chain.push(pipeline.authenticate, pipeline.resolveContext(def.access));
-      if (def.permissions?.length) chain.push(pipeline.authorize(def.permissions));
+      if (def.permissions?.length) chain.push(pipeline.authorize(def.permissions, def.features));
     }
     chain.push(async (req: Request, res: Response, next: NextFunction) => {
       try {

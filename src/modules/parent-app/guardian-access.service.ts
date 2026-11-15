@@ -9,7 +9,6 @@ import {
   roleAssignments,
   roles,
   studentGuardians,
-  tenants,
   userSessions,
   users,
 } from '../../db/schema/index.js';
@@ -21,9 +20,9 @@ import {
   NotFoundError,
   ValidationError,
 } from '../../shared/errors.js';
-import { toLoginPhone } from '../../shared/phone.js';
 import type { AuthorizationService } from '../access/authorization.service.js';
 import { deletePin } from '../identity/app-pin.js';
+import { assertLoginPhoneFree, normalizeLoginPhone } from '../identity/login-phone.js';
 import { hashPassword, PasswordSchema } from '../identity/password.js';
 import { setPasswordByAdmin } from '../members/credentials.js';
 import { assignRoles, inviteMember } from '../members/invitations.js';
@@ -42,9 +41,6 @@ export const DisableAppAccessBody = z.object({ reason: z.string().trim().max(500
 type GuardianRow = typeof guardians.$inferSelect;
 
 const PARENT_ROLE = 'PARENT';
-
-/** Placeholder sign-in email for a parent who has none (they sign in with the mobile number). */
-const placeholderEmail = (guardianId: string) => `guardian-${guardianId}@parents.invalid`;
 
 /**
  * Parent app logins, managed by the school (admin panel → Guardians). The school turns the app
@@ -133,34 +129,12 @@ export class GuardianAccessService {
       enabled,
       membership_status: login?.membership?.status ?? null,
       login_phone: login?.user?.loginPhone ?? null,
-      email:
-        login?.user && !login.user.email.endsWith('@parents.invalid') ? login.user.email : null,
+      email: login?.user?.email ?? null,
       last_login_at: login?.user?.lastLoginAt?.toISOString() ?? null,
       also_staff: !!login?.roleCodes.some((c) => c !== PARENT_ROLE),
       children_linked: links.length,
       children_visible: links.filter((l) => l.allowed).length,
     };
-  }
-
-  private async country(ex: Executor, tenantId: string) {
-    const [t] = await ex
-      .select({ c: tenants.country })
-      .from(tenants)
-      .where(eq(tenants.id, tenantId));
-    return t?.c ?? null;
-  }
-
-  private async assertPhoneFree(ex: Executor, phone: string, userId: string | null) {
-    const [other] = await ex
-      .select({ id: users.id })
-      .from(users)
-      .where(and(eq(users.loginPhone, phone), userId ? ne(users.id, userId) : undefined));
-    if (other)
-      throw new ConflictError(
-        'DUPLICATE_RESOURCE',
-        'This mobile number already signs in to another account',
-        { field: 'phone' },
-      );
   }
 
   /** Turn the parent app on for a guardian (create or reuse the login, add the Parent role). */
@@ -191,12 +165,7 @@ export class GuardianAccessService {
       );
 
     const rawPhone = input.phone ?? g.phone;
-    const phone = rawPhone ? toLoginPhone(rawPhone, await this.country(this.db, tenantId)) : null;
-    if (rawPhone && !phone)
-      throw new ValidationError('The request is invalid', {
-        location: 'body',
-        issues: [{ path: 'phone', message: 'This is not a valid mobile number' }],
-      });
+    const phone = rawPhone ? await normalizeLoginPhone(this.db, rawPhone, tenantId, 'phone') : null;
     const email = input.email ?? g.email?.trim().toLowerCase() ?? null;
     if (!phone && !email)
       throw new ValidationError('The request is invalid', {
@@ -221,9 +190,12 @@ export class GuardianAccessService {
       )
         throw new ConflictError('DUPLICATE_RESOURCE', 'This guardian already has the parent app');
 
-      // Someone who already signs in with this email (e.g. a teacher who is also a parent).
-      // A mobile number is only ever a parent login, so a number in use is a conflict below.
-      const [existing] = email ? await tx.select().from(users).where(eq(users.email, email)) : [];
+      // Someone who already signs in with this email or mobile number (e.g. a teacher who is
+      // also a parent): the same login gains the Parent role.
+      const [byEmail] = email ? await tx.select().from(users).where(eq(users.email, email)) : [];
+      const [byPhone] =
+        !byEmail && phone ? await tx.select().from(users).where(eq(users.loginPhone, phone)) : [];
+      const existing = byEmail ?? byPhone;
       if (existing) {
         const [owner] = await tx
           .select({ id: guardians.id })
@@ -273,7 +245,8 @@ export class GuardianAccessService {
           this.deps,
           tx,
           {
-            email: email ?? placeholderEmail(locked.id),
+            email,
+            loginPhone: phone,
             firstName: locked.firstName,
             lastName: locked.lastName,
             tenantId,
@@ -299,7 +272,7 @@ export class GuardianAccessService {
         created = true;
       }
       if (phone) {
-        await this.assertPhoneFree(tx, phone, userId);
+        await assertLoginPhoneFree(tx, phone, userId, 'phone');
         await tx.update(users).set({ loginPhone: phone }).where(eq(users.id, userId));
       }
       await tx

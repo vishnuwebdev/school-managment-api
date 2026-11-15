@@ -16,6 +16,7 @@ import {
   subjects,
   students,
   teachers,
+  users,
 } from '../../db/schema/index.js';
 import { recordChange } from '../../platform/record.js';
 import {
@@ -410,7 +411,25 @@ export class SessionService {
     const [head] = await this.viewSelect(ex).where(eq(attendanceSessions.id, s.id));
     if (!head) throw new NotFoundError('Attendance session');
     const { roster, summary } = await this.buildRoster(ex, s);
-    return { ...this.presentHeader(head), summary, roster };
+    const names = await this.userNames(ex, [s.submittedBy, s.approvedBy]);
+    return {
+      ...this.presentHeader(head),
+      submitted_by_name: (s.submittedBy && names.get(s.submittedBy)) ?? null,
+      approved_by_name: (s.approvedBy && names.get(s.approvedBy)) ?? null,
+      summary,
+      roster,
+    };
+  }
+
+  /** Display names of some users (for "Marked by … · Approved by …"). */
+  private async userNames(ex: Executor, ids: (string | null)[]) {
+    const wanted = [...new Set(ids.filter((id): id is string => !!id))];
+    if (wanted.length === 0) return new Map<string, string>();
+    const list = await ex
+      .select({ id: users.id, first: users.firstName, last: users.lastName })
+      .from(users)
+      .where(inArray(users.id, wanted));
+    return new Map(list.map((u) => [u.id, `${u.first} ${u.last ?? ''}`.trim()]));
   }
 
   async list(c: Caller, q: z.infer<typeof SessionListQuery>) {

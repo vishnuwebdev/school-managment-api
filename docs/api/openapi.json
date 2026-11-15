@@ -3015,10 +3015,19 @@
                     },
                     "minItems": 1,
                     "maxItems": 20
+                  },
+                  "mobile": {
+                    "type": "string",
+                    "minLength": 7,
+                    "maxLength": 32
+                  },
+                  "password": {
+                    "type": "string",
+                    "minLength": 6,
+                    "maxLength": 128
                   }
                 },
                 "required": [
-                  "email",
                   "first_name",
                   "roles"
                 ]
@@ -3239,6 +3248,167 @@
                 },
                 "required": [
                   "reason"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Permission, entitlement or tenant access denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation or business-rule error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/members/{id}/mobile": {
+      "put": {
+        "summary": "Change (or remove, with null) the mobile number a user signs in with",
+        "description": "Access: **tenant**\n\n**Requires:** `members.update`\n\nSchool context. Platform users must send `X-Tenant-Id` and hold `platform.tenants.access`.",
+        "tags": [
+          "School · Users"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "mobile": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "minLength": 7,
+                    "maxLength": 32
+                  }
+                },
+                "required": [
+                  "mobile"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Permission, entitlement or tenant access denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation or business-rule error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/members/{id}/password": {
+      "put": {
+        "summary": "Set a user's password (signs them out everywhere; the login becomes active)",
+        "description": "Access: **tenant**\n\n**Requires:** `members.update`\n\nSchool context. Platform users must send `X-Tenant-Id` and hold `platform.tenants.access`.",
+        "tags": [
+          "School · Users"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "password": {
+                    "type": "string",
+                    "minLength": 6,
+                    "maxLength": 128
+                  }
+                },
+                "required": [
+                  "password"
                 ]
               }
             }
@@ -4971,7 +5141,7 @@
                           "BANK_TRANSFER",
                           "CHEQUE",
                           "CARD",
-                          "MOBILE_MONEY",
+                          "UPI",
                           "OTHER"
                         ]
                       },
@@ -5083,7 +5253,7 @@
                       "BANK_TRANSFER",
                       "CHEQUE",
                       "CARD",
-                      "MOBILE_MONEY",
+                      "UPI",
                       "OTHER"
                     ]
                   },
@@ -18050,7 +18220,7 @@
     },
     "/teachers": {
       "get": {
-        "summary": "List and search teachers (filters: status, department, employment_type, has_login)",
+        "summary": "List and search teachers (filters: status, status_group, department, employment_type, has_login, has_assignments)",
         "description": "Access: **tenant**\n\n**Requires:** `teachers.read`\n\nSchool context. Platform users must send `X-Tenant-Id` and hold `platform.tenants.access`.",
         "tags": [
           "School · Teachers & staff"
@@ -18130,6 +18300,27 @@
             },
             "required": false,
             "name": "status",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "CURRENT",
+                "JOINING",
+                "LEFT"
+              ]
+            },
+            "required": false,
+            "name": "status_group",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "has_assignments",
             "in": "query"
           },
           {
@@ -18509,6 +18700,55 @@
         }
       }
     },
+    "/teachers/summary": {
+      "get": {
+        "summary": "Counts for the teacher list: per status and status group, current teachers (not left) without a login or a teaching assignment",
+        "description": "Access: **tenant**\n\n**Requires:** `teachers.read`\n\nSchool context. Platform users must send `X-Tenant-Id` and hold `platform.tenants.access`.",
+        "tags": [
+          "School · Teachers & staff"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Permission, entitlement or tenant access denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation or business-rule error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/teachers/export": {
       "get": {
         "summary": "Export the filtered teacher list as CSV (audited)",
@@ -18591,6 +18831,27 @@
             },
             "required": false,
             "name": "status",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "CURRENT",
+                "JOINING",
+                "LEFT"
+              ]
+            },
+            "required": false,
+            "name": "status_group",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "has_assignments",
             "in": "query"
           },
           {
@@ -20016,6 +20277,11 @@
                     "type": "string",
                     "maxLength": 254,
                     "format": "email"
+                  },
+                  "mobile": {
+                    "type": "string",
+                    "minLength": 7,
+                    "maxLength": 32
                   },
                   "password": {
                     "type": "string",
@@ -22386,7 +22652,7 @@
     },
     "/attendance/today": {
       "get": {
-        "summary": "Per-section state of the day's DAILY register (NOT_STARTED / DRAFT / SUBMITTED / FINAL) with counts, for the active year",
+        "summary": "Per-section state of the day's DAILY register (NOT_STARTED / DRAFT / SUBMITTED / FINAL) with counts, for the active year. Also per section: day_off {reason, name} | null, class_teacher, last_marked_by / last_marked_at; and the whole school's day_off",
         "description": "Access: **tenant**\n\n**Requires:** `attendance.read`\n\nSchool context. Platform users must send `X-Tenant-Id` and hold `platform.tenants.access`.",
         "tags": [
           "School · Attendance reports"
@@ -26836,7 +27102,7 @@
     },
     "/exams": {
       "get": {
-        "summary": "Exams with their progress (stage, papers, marks entered). Filters: status, year_id",
+        "summary": "Exams with their progress (stage, papers, marks entered) and card labels (class_names, class_label, teacher_name). Filters: status, year_id",
         "description": "Access: **tenant**\n\n**Requires:** `exams.read`\n\nSchool context. Platform users must send `X-Tenant-Id` and hold `platform.tenants.access`.",
         "tags": [
           "School · Examinations"
@@ -28201,7 +28467,7 @@
     },
     "/exams/papers/{paper_id}/marks": {
       "get": {
-        "summary": "The class list for a paper with each student’s marks",
+        "summary": "The class list for a paper with each student’s marks, section and roll number",
         "description": "Access: **tenant**\n\n**Requires:** `exams.read`\n\nSchool context. Platform users must send `X-Tenant-Id` and hold `platform.tenants.access`.",
         "tags": [
           "School · Examinations"
@@ -28484,6 +28750,144 @@
             "required": true,
             "name": "class_id",
             "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Permission, entitlement or tenant access denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation or business-rule error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/exams/{id}/report-cards/pdf": {
+      "get": {
+        "summary": "Report cards of one section as one PDF (a page per student, in roll-number order). Published exams only",
+        "description": "Access: **tenant**\n\n**Requires:** `exams.read`\n\nSchool context. Platform users must send `X-Tenant-Id` and hold `platform.tenants.access`.",
+        "tags": [
+          "School · Examinations"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "section_id",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Permission, entitlement or tenant access denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation or business-rule error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/exams/{id}/report-cards/{student_id}/pdf": {
+      "get": {
+        "summary": "Report card PDF of one student (same layout as the parent app). Published exams only",
+        "description": "Access: **tenant**\n\n**Requires:** `exams.read`\n\nSchool context. Platform users must send `X-Tenant-Id` and hold `platform.tenants.access`.",
+        "tags": [
+          "School · Examinations"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "student_id",
+            "in": "path"
           }
         ],
         "responses": {
@@ -34040,6 +34444,55 @@
         }
       }
     },
+    "/dashboard/school": {
+      "get": {
+        "summary": "The school admin's home page: today's attendance, fees, teachers, exams, parent requests, admissions, classes and what's coming up, with trends. Each part is null when the caller may not see it.",
+        "description": "Access: **tenant**\n\n**Requires:** `tenant.profile.read`\n\nSchool context. Platform users must send `X-Tenant-Id` and hold `platform.tenants.access`.",
+        "tags": [
+          "School · Dashboard"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Permission, entitlement or tenant access denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation or business-rule error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/parent/me": {
       "get": {
         "summary": "The signed-in parent, their school and their children (call after sign-in)",
@@ -35965,6 +36418,14 @@
             "required": false,
             "name": "assigned_to_me",
             "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "awaiting_reply",
+            "in": "query"
           }
         ],
         "responses": {
@@ -36764,6 +37225,14 @@
             "required": false,
             "name": "assigned_to_me",
             "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "awaiting_reply",
+            "in": "query"
           }
         ],
         "responses": {
@@ -36805,7 +37274,7 @@
     },
     "/feedback/summary": {
       "get": {
-        "summary": "Counts for the inbox badge: unread, open, and open by kind",
+        "summary": "Counts for the inbox: unread, open, awaiting a school reply, resolved this month, and open by kind",
         "description": "Access: **tenant**\n\n**Requires:** `feedback.read`\n\nSchool context. Platform users must send `X-Tenant-Id` and hold `platform.tenants.access`.",
         "tags": [
           "School · Parent requests & feedback"
@@ -37122,7 +37591,11 @@
               "enum": [
                 "OVERDUE",
                 "PART_PAID",
-                "UP_TO_DATE"
+                "UP_TO_DATE",
+                "BEHIND",
+                "PAID_IN_FULL",
+                "NO_PLAN",
+                "DUE_THIS_MONTH"
               ]
             },
             "required": false,
@@ -37244,7 +37717,11 @@
               "enum": [
                 "OVERDUE",
                 "PART_PAID",
-                "UP_TO_DATE"
+                "UP_TO_DATE",
+                "BEHIND",
+                "PAID_IN_FULL",
+                "NO_PLAN",
+                "DUE_THIS_MONTH"
               ]
             },
             "required": false,
@@ -42033,6 +42510,7 @@
                     "type": "string",
                     "enum": [
                       "CASH",
+                      "UPI",
                       "BANK_TRANSFER",
                       "CHEQUE",
                       "CARD",
@@ -42521,8 +42999,8 @@
     },
     "/fees/payments/{id}/cancel": {
       "post": {
-        "summary": "Cancel a payment recorded in error: reverses its allocations and voids its receipt",
-        "description": "Access: **tenant**\n\n**Requires:** `fees.payments.verify`\n\nSchool context. Platform users must send `X-Tenant-Id` and hold `platform.tenants.access`.",
+        "summary": "Cancel a payment recorded in error: reverses its allocations and voids its receipt (School Admin)",
+        "description": "Access: **tenant**\n\n**Requires:** `fees.payments.cancel`\n\nSchool context. Platform users must send `X-Tenant-Id` and hold `platform.tenants.access`.",
         "tags": [
           "School · Fee payments and receipts"
         ],
@@ -47398,6 +47876,11 @@
                         "maxLength": 254,
                         "format": "email"
                       },
+                      "mobile": {
+                        "type": "string",
+                        "minLength": 7,
+                        "maxLength": 32
+                      },
                       "first_name": {
                         "type": "string",
                         "minLength": 1,
@@ -47406,10 +47889,14 @@
                       "last_name": {
                         "type": "string",
                         "maxLength": 100
+                      },
+                      "password": {
+                        "type": "string",
+                        "minLength": 6,
+                        "maxLength": 128
                       }
                     },
                     "required": [
-                      "email",
                       "first_name"
                     ]
                   },
@@ -47509,7 +47996,7 @@
                           "BANK_TRANSFER",
                           "CHEQUE",
                           "CARD",
-                          "MOBILE_MONEY",
+                          "UPI",
                           "OTHER"
                         ]
                       },
@@ -47538,6 +48025,245 @@
                 "required": [
                   "plan_code",
                   "admin"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Permission, entitlement or tenant access denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation or business-rule error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/platform/tenants/{id}/admins": {
+      "get": {
+        "summary": "The school's admins and whether each login is ready",
+        "description": "Access: **platform**\n\n**Requires:** `platform.tenants.read`",
+        "tags": [
+          "Platform · Schools"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Permission, entitlement or tenant access denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation or business-rule error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/platform/tenants/{id}/admins/{membershipId}/mobile": {
+      "put": {
+        "summary": "Change (or remove, with null) the mobile number a school admin signs in with",
+        "description": "Access: **platform**\n\n**Requires:** `platform.tenants.provision`",
+        "tags": [
+          "Platform · Schools"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "membershipId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "mobile": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "minLength": 7,
+                    "maxLength": 32
+                  }
+                },
+                "required": [
+                  "mobile"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Permission, entitlement or tenant access denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation or business-rule error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/platform/tenants/{id}/admins/{membershipId}/password": {
+      "put": {
+        "summary": "Set or reset a school admin's password (signs them out everywhere)",
+        "description": "Access: **platform**\n\n**Requires:** `platform.tenants.provision`",
+        "tags": [
+          "Platform · Schools"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "membershipId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "password": {
+                    "type": "string",
+                    "minLength": 6,
+                    "maxLength": 128
+                  }
+                },
+                "required": [
+                  "password"
                 ]
               }
             }
@@ -48048,7 +48774,7 @@
                           "BANK_TRANSFER",
                           "CHEQUE",
                           "CARD",
-                          "MOBILE_MONEY",
+                          "UPI",
                           "OTHER"
                         ]
                       },
@@ -48942,9 +49668,146 @@
         }
       }
     },
+    "/platform/users/{id}": {
+      "get": {
+        "summary": "Platform user detail",
+        "description": "Access: **platform**\n\n**Requires:** `platform.users.read`",
+        "tags": [
+          "Platform · Users"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Permission, entitlement or tenant access denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation or business-rule error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Remove a platform user",
+        "description": "Access: **platform**\n\n**Requires:** `platform.users.manage`",
+        "tags": [
+          "Platform · Users"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "reason": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 500
+                  }
+                },
+                "required": [
+                  "reason"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Success"
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Permission, entitlement or tenant access denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation or business-rule error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/platform/users/invitations": {
       "post": {
-        "summary": "Invite a platform user",
+        "summary": "Add a platform user (email invitation, or a password set now)",
         "description": "Access: **platform**\n\n**Requires:** `platform.users.manage`",
         "tags": [
           "Platform · Users"
@@ -49007,10 +49870,19 @@
                     },
                     "minItems": 1,
                     "maxItems": 10
+                  },
+                  "mobile": {
+                    "type": "string",
+                    "minLength": 7,
+                    "maxLength": 32
+                  },
+                  "password": {
+                    "type": "string",
+                    "minLength": 6,
+                    "maxLength": 128
                   }
                 },
                 "required": [
-                  "email",
                   "first_name",
                   "roles"
                 ]
@@ -49162,9 +50034,9 @@
         }
       }
     },
-    "/platform/users/{id}": {
-      "delete": {
-        "summary": "Remove a platform user",
+    "/platform/users/{id}/mobile": {
+      "put": {
+        "summary": "Change (or remove, with null) the mobile number a platform user signs in with",
         "description": "Access: **platform**\n\n**Requires:** `platform.users.manage`",
         "tags": [
           "Platform · Users"
@@ -49191,21 +50063,103 @@
               "schema": {
                 "type": "object",
                 "properties": {
-                  "reason": {
-                    "type": "string",
-                    "minLength": 3,
-                    "maxLength": 500
+                  "mobile": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "minLength": 7,
+                    "maxLength": 32
                   }
                 },
                 "required": [
-                  "reason"
+                  "mobile"
                 ]
               }
             }
           }
         },
         "responses": {
-          "204": {
+          "200": {
+            "description": "Success"
+          },
+          "401": {
+            "description": "Authentication required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Permission, entitlement or tenant access denied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation or business-rule error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/platform/users/{id}/password": {
+      "put": {
+        "summary": "Set a platform user's password (signs them out everywhere; the login becomes active)",
+        "description": "Access: **platform**\n\n**Requires:** `platform.users.manage`",
+        "tags": [
+          "Platform · Users"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "password": {
+                    "type": "string",
+                    "minLength": 6,
+                    "maxLength": 128
+                  }
+                },
+                "required": [
+                  "password"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
             "description": "Success"
           },
           "401": {

@@ -547,6 +547,48 @@ describe('teaching assignments', () => {
     expect(row.active_assignment_count).toBe(2);
   });
 
+  it('lists subjects per row, filters by status group and assignments, and summarises', async () => {
+    const before = (await api.get('/teachers/summary')).body.data;
+    const teaching = await newTeacher('Teaching');
+    await assign(teaching.id, sciSecA);
+    await assign(teaching.id, mathWide);
+    const idle = await newTeacher('Idle');
+    const joining = await newTeacher('Joining', { status: 'ONBOARDING' });
+    const gone = await newTeacher('Gone');
+    expect((await cmd(api, gone.id, 'deactivate', { reason: 'Left the school' })).status).toBe(200);
+
+    const row = (await api.get(`/teachers?search=${teaching.teacher_number}`)).body.data[0];
+    expect(row.subjects).toEqual(['Mathematics', 'Science']);
+    expect(
+      (await api.get(`/teachers?search=${idle.teacher_number}`)).body.data[0].subjects,
+    ).toEqual([]);
+
+    const ids = async (q: string) =>
+      ((await api.get(`/teachers?page_size=100&${q}`)).body.data as T[]).map((t) => t.id);
+    expect(await ids('has_assignments=true')).toContain(teaching.id);
+    expect(await ids('has_assignments=true')).not.toContain(idle.id);
+    expect(await ids('has_assignments=false')).toContain(idle.id);
+    expect(await ids(`status_group=JOINING&search=${joining.teacher_number}`)).toEqual([
+      joining.id,
+    ]);
+    expect(await ids(`status_group=LEFT&search=${gone.teacher_number}`)).toEqual([gone.id]);
+    expect(await ids(`status_group=CURRENT&search=${gone.teacher_number}`)).toEqual([]);
+    expect(await ids(`status_group=CURRENT&search=${idle.teacher_number}`)).toEqual([idle.id]);
+    expect((await api.get('/teachers?status_group=SOMETIMES')).status).toBe(422);
+
+    const after = (await api.get('/teachers/summary')).body.data;
+    expect(after.total - before.total).toBe(4);
+    expect(after.current - before.current).toBe(3);
+    expect(after.joining - before.joining).toBe(1);
+    expect(after.left - before.left).toBe(1);
+    expect(after.by_status.ACTIVE - (before.by_status.ACTIVE ?? 0)).toBe(2);
+    expect(after.current_without_login - before.current_without_login).toBe(3);
+    expect(after.current_without_assignments - before.current_without_assignments).toBe(2);
+    // Another school's teachers are never counted.
+    const other = (await B.admin.api.get('/teachers/summary')).body.data;
+    expect(other.total).toBeLessThan(after.total);
+  });
+
   it('allows several teachers on one offering (primary, co-teacher, substitute)', async () => {
     const off = await freshOffering();
     const [p, c, s] = await Promise.all([newTeacher('Prim'), newTeacher('Co'), newTeacher('Sub')]);

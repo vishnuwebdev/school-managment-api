@@ -1,12 +1,28 @@
-import { and, asc, count, desc, eq, isNotNull, isNull, like, or, sql, type SQL } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  count,
+  desc,
+  eq,
+  inArray,
+  isNotNull,
+  isNull,
+  like,
+  notInArray,
+  or,
+  sql,
+  type SQL,
+} from 'drizzle-orm';
 import type { z } from 'zod';
 import type { CalendarService } from '../calendar/calendar.service.js';
 import type { Deps } from '../../container.js';
 import type { Executor } from '../../db/client.js';
 import {
+  roles,
   TEACHER_LEAVING_STATUSES,
   teacherHistory,
   teachers,
+  teachingAssignments,
   users,
   type TeacherStatus,
 } from '../../db/schema/index.js';
@@ -167,6 +183,16 @@ export class TeacherService {
       teacherScope(principal, 'teachers.read'),
     ];
     if (q.status) conds.push(eq(teachers.status, q.status));
+    if (q.status_group === 'LEFT')
+      conds.push(inArray(teachers.status, [...TEACHER_LEAVING_STATUSES]));
+    if (q.status_group === 'CURRENT')
+      conds.push(notInArray(teachers.status, [...TEACHER_LEAVING_STATUSES]));
+    if (q.status_group === 'JOINING')
+      conds.push(inArray(teachers.status, ['PROSPECTIVE', 'ONBOARDING']));
+    if (q.has_assignments !== undefined) {
+      const teaching = sql`exists (select 1 from ${teachingAssignments} where ${teachingAssignments.tenantId} = ${teachers.tenantId} and ${teachingAssignments.teacherId} = ${teachers.id} and ${teachingAssignments.status} = 'ACTIVE')`;
+      conds.push(q.has_assignments ? teaching : sql`not ${teaching}`);
+    }
     if (q.employment_type) conds.push(eq(teachers.employmentType, q.employment_type));
     if (q.department) conds.push(eq(teachers.department, q.department));
     if (q.has_login !== undefined)
@@ -213,15 +239,58 @@ export class TeacherService {
         .offset(offsetOf(q)),
       this.db.select({ n: count() }).from(teachers).where(where),
     ]);
-    const counts = await this.assignments.activeCounts(
-      tenantId,
-      rows.map((r) => r.id),
-    );
+    const ids = rows.map((r) => r.id);
+    const [counts, subjectNames] = await Promise.all([
+      this.assignments.activeCounts(tenantId, ids),
+      this.assignments.activeSubjectNames(tenantId, ids),
+    ]);
     return pageOf(
-      rows.map((r) => ({ ...presentTeacher(r), active_assignment_count: counts.get(r.id) ?? 0 })),
+      rows.map((r) => ({
+        ...presentTeacher(r),
+        active_assignment_count: counts.get(r.id) ?? 0,
+        subjects: subjectNames.get(r.id) ?? [],
+      })),
       total?.n ?? 0,
       q,
     );
+  }
+
+  /**
+   * Counts for the list's quick filters: teachers per status and status group,
+   * and current teachers (not left) with no login or no active teaching assignment.
+   */
+  async summary(tenantId: string, principal: Principal) {
+    const scope = and(eq(teachers.tenantId, tenantId), teacherScope(principal, 'teachers.read'));
+    const teaching = sql`exists (select 1 from ${teachingAssignments} where ${teachingAssignments.tenantId} = ${teachers.tenantId} and ${teachingAssignments.teacherId} = ${teachers.id} and ${teachingAssignments.status} = 'ACTIVE')`;
+    const [byStatus, [current]] = await Promise.all([
+      this.db
+        .select({ status: teachers.status, n: count() })
+        .from(teachers)
+        .where(scope)
+        .groupBy(teachers.status),
+      this.db
+        .select({
+          noLogin: sql<number>`coalesce(sum(case when ${teachers.membershipId} is null then 1 else 0 end), 0)`,
+          noAssignments: sql<number>`coalesce(sum(case when ${teaching} then 0 else 1 end), 0)`,
+        })
+        .from(teachers)
+        .where(and(scope, notInArray(teachers.status, [...TEACHER_LEAVING_STATUSES]))),
+    ]);
+    const by_status: Record<string, number> = {};
+    for (const r of byStatus) by_status[r.status] = r.n;
+    const sum = (statuses: readonly string[]) =>
+      statuses.reduce((n, s) => n + (by_status[s] ?? 0), 0);
+    const total = byStatus.reduce((n, r) => n + r.n, 0);
+    const left = sum(TEACHER_LEAVING_STATUSES);
+    return {
+      total,
+      by_status,
+      current: total - left,
+      joining: sum(['PROSPECTIVE', 'ONBOARDING']),
+      left,
+      current_without_login: Number(current?.noLogin ?? 0),
+      current_without_assignments: Number(current?.noAssignments ?? 0),
+    };
   }
 
   // ---- detail ----------------------------------------------------------------------
@@ -257,6 +326,7 @@ export class TeacherService {
         status: 'NONE' as const,
         membership_id: null,
         email: null,
+        login_phone: null,
         roles: [] as { role_id: string; code: string; name: string }[],
         invitation: null,
         password_set: false,
@@ -272,6 +342,7 @@ export class TeacherService {
       status: m.status,
       membership_id: m.id,
       email: m.user.email,
+      login_phone: m.user.login_phone,
       roles: m.roles.map((r) => ({ role_id: r.role_id, code: r.code, name: r.name })),
       invitation: m.invitation,
       /** The account has a password (it never says what it is). */
@@ -790,6 +861,18 @@ export class TeacherService {
 
   // ---- portal access -------------------------------------------------------------------
 
+  /** The built-in Teacher role. */
+  private async teacherRoleId(): Promise<string> {
+    const [role] = await this.db
+      .select({ id: roles.id })
+      .from(roles)
+      .where(
+        and(eq(roles.tenantKey, 'SYSTEM'), eq(roles.code, 'TEACHER'), eq(roles.status, 'ACTIVE')),
+      );
+    if (!role) throw new Error('System role TEACHER is missing — run the seed');
+    return role.id;
+  }
+
   /**
    * Give a teacher a login: invite through the members service (so the
    * anti-escalation rules apply) and link the membership. The teacher record
@@ -816,31 +899,31 @@ export class TeacherService {
           membership_id: t.membershipId,
         });
     }
-    const email = input.email ?? t.email;
-    if (!email)
+    const email = input.email ?? t.email ?? null;
+    if (!email && !input.mobile)
       throw new ValidationError('The request is invalid', {
         location: 'body',
         issues: [
           {
             path: 'email',
             code: 'required',
-            message: 'This teacher has no email address. Provide one for the invitation.',
+            message: 'This teacher has no email address. Add an email or a mobile number.',
           },
         ],
       });
+    const roleId = input.role_id ?? (await this.teacherRoleId());
     const member = await this.members.invite(
       tenantId,
       {
         password: input.password,
         email,
+        mobile: input.mobile ?? null,
         firstName: t.preferredName ?? t.firstName,
         lastName: t.lastName,
         // A teacher's login sees only the sections they are assigned to, unless the
         // school explicitly gives the role school-wide scope.
         assignments: [
-          input.scope === 'ALL'
-            ? { roleId: input.role_id }
-            : { roleId: input.role_id, scopeType: 'ASSIGNED_SECTION' as const },
+          input.scope === 'ALL' ? { roleId } : { roleId, scopeType: 'ASSIGNED_SECTION' as const },
         ],
       },
       principal,
@@ -861,7 +944,7 @@ export class TeacherService {
           eventType: input.password ? 'PORTAL_ACCESS_GRANTED' : 'PORTAL_ACCESS_INVITED',
           details: {
             membership_id: member.id,
-            role_ids: [input.role_id],
+            role_ids: [roleId],
             method: input.password ? 'PASSWORD_SET_BY_ADMIN' : 'EMAIL_INVITATION',
           },
         });
@@ -872,7 +955,7 @@ export class TeacherService {
           event: 'teacher.portal_access_invited',
           before: { membership_id: teacher.membershipId },
           after: { membership_id: member.id },
-          payload: { membership_id: member.id, role_id: input.role_id },
+          payload: { membership_id: member.id, role_id: roleId },
         });
       });
     } catch (err) {

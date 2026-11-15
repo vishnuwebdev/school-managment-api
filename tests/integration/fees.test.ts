@@ -1015,12 +1015,19 @@ describe('payments and receipts', () => {
     expect((await teach.get('/fees/reports/by-class')).status).toBe(403);
   });
 
-  it('refuses gateway methods: payments are recorded, never collected here', async () => {
+  it('records UPI received by the school but refuses gateway payments', async () => {
     const b = await bill(api, FA);
-    for (const method of ['UPI', 'ONLINE_GATEWAY']) {
-      const r = await pay(acct, b.student.id, '10.00', { method, provider_reference: uniq('G') });
-      expect(r.status, method).toBe(422);
-    }
+    const upi = await pay(acct, b.student.id, '10.00', {
+      method: 'UPI',
+      provider_reference: uniq('UTR'),
+    });
+    expect(upi.status, JSON.stringify(upi.body)).toBe(201);
+    expect(upi.body.data.method).toBe('UPI');
+    const r = await pay(acct, b.student.id, '10.00', {
+      method: 'ONLINE_GATEWAY',
+      provider_reference: uniq('G'),
+    });
+    expect(r.status).toBe(422);
   });
 
   it('prints a receipt as a PDF and keeps proof of payment', async () => {
@@ -1344,8 +1351,14 @@ describe('verification, failure, cancellation and receipts', () => {
     const b = await bill(api, FA);
     const p = await paid(acct, b.student.id, '1200.00', { allocation: { mode: 'AUTO' } });
     expect((await demand(api, b.c1.id)).status).toBe('PAID');
+    // Only the School Admin cancels payments; the accountant records and verifies them.
+    bad(
+      await acct.post(`/fees/payments/${p.id}/cancel`, { reason: 'Not mine to cancel' }),
+      403,
+      'PERMISSION_DENIED',
+    );
     const c = ok(
-      await acct.post(`/fees/payments/${p.id}/cancel`, {
+      await api.post(`/fees/payments/${p.id}/cancel`, {
         reason: 'Recorded against the wrong child',
       }),
     );
@@ -1359,7 +1372,7 @@ describe('verification, failure, cancellation and receipts', () => {
     expect(d1.paid_amount).toBe('0.00');
     expect(d1.status).toBe('OVERDUE');
     bad(
-      await acct.post(`/fees/payments/${p.id}/cancel`, { reason: 'Twice' }),
+      await api.post(`/fees/payments/${p.id}/cancel`, { reason: 'Twice' }),
       422,
       'INVALID_STATE',
       'NOT_CANCELLABLE',
@@ -1752,7 +1765,7 @@ describe('refunds', () => {
       201,
     );
     bad(
-      await acct.post(`/fees/payments/${p.id}/cancel`, { reason: 'Mistake' }),
+      await api.post(`/fees/payments/${p.id}/cancel`, { reason: 'Mistake' }),
       422,
       'INVALID_STATE',
       'REFUND_IN_PROGRESS',
@@ -1760,7 +1773,7 @@ describe('refunds', () => {
     ok(await acct.post(`/fees/refunds/${r.id}/cancel`, { reason: 'Withdrawn' }));
     await refundOf(p.id, '100.00');
     bad(
-      await acct.post(`/fees/payments/${p.id}/cancel`, { reason: 'Mistake' }),
+      await api.post(`/fees/payments/${p.id}/cancel`, { reason: 'Mistake' }),
       422,
       'INVALID_STATE',
       'NOT_CANCELLABLE',

@@ -298,7 +298,8 @@ export function parentRequestRoutes(svc: ParentRequestService, app: ParentAppSer
     defineRoute({
       method: 'get',
       path: '/feedback/summary',
-      summary: 'Counts for the inbox badge: unread, open, and open by kind',
+      summary:
+        'Counts for the inbox: unread, open, awaiting a school reply, resolved this month, and open by kind',
       tags: OFFICE_TAG,
       access: 'tenant',
       permissions: ['feedback.read'],

@@ -15,6 +15,7 @@ import type {
   StudentHistoryQuery,
   TodayQuery,
 } from './attendance.schemas.js';
+import { dayOff, type CalendarSubject } from '../calendar/calendar.rules.js';
 import type { CalendarService } from '../calendar/calendar.service.js';
 import type { AttendanceConfigService } from './config.service.js';
 import {
@@ -113,6 +114,16 @@ export class ReportService {
       .select()
       .from(academicYears)
       .where(and(eq(academicYears.tenantId, c.tenantId), eq(academicYears.isCurrent, true)));
+    // Why the day is off (weekly off or holiday): one settings and one holiday read for every section.
+    const [calSettings, holidays] = await Promise.all([
+      this.calendar.settings(c.tenantId),
+      this.calendar.activeHolidays(c.tenantId, date, date),
+    ]);
+    const offFor = (who: CalendarSubject) => {
+      const off = dayOff(calSettings, holidays, date, who);
+      return off ? { reason: off.reason, name: off.name } : null;
+    };
+    const schoolDayOff = offFor({ kind: 'students' });
     const totals = {
       sections: 0,
       not_started: 0,
@@ -123,7 +134,7 @@ export class ReportService {
       marked: 0,
       counts: emptyCounts(),
     };
-    if (!year) return { date, academic_year: null, totals, sections: [] };
+    if (!year) return { date, day_off: schoolDayOff, academic_year: null, totals, sections: [] };
     const conds: SQL[] = [
       sql`sec.tenant_id = ${c.tenantId}`,
       sql`sec.academic_year_id = ${year.id}`,
@@ -170,6 +181,11 @@ export class ReportService {
         group by e.section_id`,
     );
     const sizeOf = new Map(sizes.map((s) => [s.section_id, num(s.n)]));
+    const teacherOf = await this.classTeachers(c.tenantId);
+    const lastMark = await this.lastMarks(
+      c.tenantId,
+      data.map((r) => r.session_id as string | null).filter((id): id is string => !!id),
+    );
     const sections = data.map((r) => {
       const state = (r.session_id ? r.session_status : 'NOT_STARTED') as
         'NOT_STARTED' | 'DRAFT' | 'SUBMITTED' | 'FINAL';
@@ -201,14 +217,72 @@ export class ReportService {
         roster_size: rosterSize,
         marked_count: marked,
         counts,
+        day_off: offFor({
+          kind: 'class',
+          classId: String(r.class_id),
+          sectionId: String(r.section_id),
+        }),
+        class_teacher: teacherOf.get(String(r.section_id)) ?? null,
+        last_marked_by: lastMark.get(String(r.session_id))?.by ?? null,
+        last_marked_at: lastMark.get(String(r.session_id))?.at ?? null,
       };
     });
     return {
       date,
+      day_off: schoolDayOff,
       academic_year: { id: year.id, code: year.code },
       totals,
       sections,
     };
+  }
+
+  /** The active class teacher of each section: section id -> {id, name}. */
+  private async classTeachers(tenantId: string) {
+    const list = await rows<{ section_id: string; id: string; first: string; last: string }>(
+      this.db,
+      sql`select ct.section_id, t.id, t.first_name as first, t.last_name as last
+        from section_class_teachers ct
+        join teachers t on t.tenant_id = ct.tenant_id and t.id = ct.teacher_id
+        where ct.tenant_id = ${tenantId} and ct.status = 'ACTIVE'`,
+    );
+    return new Map(
+      list.map((t) => [t.section_id, { id: t.id, name: `${t.first} ${t.last ?? ''}`.trim() }]),
+    );
+  }
+
+  /**
+   * Who saved the latest mark of each register, and when: session id -> {by, at}.
+   * `by` is null when the user no longer exists.
+   */
+  private async lastMarks(tenantId: string, sessionIds: string[]) {
+    const out = new Map<string, { by: { id: string; name: string } | null; at: string }>();
+    if (sessionIds.length === 0) return out;
+    const ids = sql.join(
+      sessionIds.map((id) => sql`${id}`),
+      sql`, `,
+    );
+    const list = await rows<Row>(
+      this.db,
+      sql`select r.session_id, r.marked_by, r.marked_at, u.first_name as first, u.last_name as last
+        from attendance_records r
+        join (select session_id, max(marked_at) as m from attendance_records
+          where tenant_id = ${tenantId} and session_id in (${ids}) group by session_id) x
+          on x.session_id = r.session_id and x.m = r.marked_at
+        left join users u on u.id = r.marked_by
+        where r.tenant_id = ${tenantId}`,
+    );
+    for (const r of list) {
+      const id = String(r.session_id);
+      if (out.has(id)) continue;
+      const at = r.marked_at instanceof Date ? r.marked_at : new Date(`${String(r.marked_at)}Z`);
+      out.set(id, {
+        by: r.first
+          ? { id: String(r.marked_by), name: `${String(r.first)} ${String(r.last ?? '')}`.trim() }
+          : null,
+        at: at.toISOString(),
+      });
+    }
+    return out;
   }
 
   // ---- register / monthly (shared matrix) ------------------------------------------

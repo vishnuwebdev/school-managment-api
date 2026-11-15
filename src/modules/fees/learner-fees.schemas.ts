@@ -49,11 +49,19 @@ export const AddChargeBody = z.object({
 });
 
 export const TRACKER_STATUS = ["OVERDUE", "PART_PAID", "UP_TO_DATE"] as const;
+/** List filters: a row status, or a group (behind = owes something overdue). */
+export const TRACKER_FILTER = [
+  ...TRACKER_STATUS,
+  "BEHIND",
+  "PAID_IN_FULL",
+  "NO_PLAN",
+  "DUE_THIS_MONTH",
+] as const;
 export const TrackerQuery = z.object({
   academic_year_id: z.uuid().optional(),
   class_id: z.uuid().optional(),
   section_id: z.uuid().optional(),
-  status: z.enum(TRACKER_STATUS).optional(),
+  status: z.enum(TRACKER_FILTER).optional(),
   search: z.string().trim().min(1).max(100).optional(),
   page: z.coerce.number().int().min(1).default(1),
   page_size: z.coerce.number().int().min(1).max(200).default(50),

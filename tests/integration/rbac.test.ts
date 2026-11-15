@@ -171,8 +171,13 @@ describe('RBAC — roles are data, permissions are the contract', () => {
   it('exposes a grouped permission catalog with entitlement and grantable flags', async () => {
     const res = await S.admin.api.get('/permissions');
     expect(res.status).toBe(200);
-    const transport = res.body.data.find((g: { feature: string }) => g.feature === 'transport');
-    expect(transport.entitled).toBe(false); // STANDARD plan
+    const fees = res.body.data.find((g: { feature: string }) => g.feature === 'fees');
+    expect(fees.entitled).toBe(true); // STANDARD plan
+    const starter = await h.provisionSchool({ plan: 'STARTER' });
+    const onStarter = await starter.admin.api.get('/permissions');
+    expect(
+      onStarter.body.data.find((g: { feature: string }) => g.feature === 'fees').entitled,
+    ).toBe(false);
     const students = res.body.data.find((g: { feature: string }) => g.feature === 'students');
     expect(students.entitled).toBe(true);
     expect(students.permissions.every((p: { grantable: boolean }) => p.grantable)).toBe(true);

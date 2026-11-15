@@ -2150,6 +2150,13 @@ describe('reports (hand-computed fixtures)', () => {
       session_id: raSession,
     });
     expect(bySec[sec].counts).toMatchObject({ present: 1, absent: 1 });
+    // who saved the latest mark, and no day off on a normal school day
+    expect(bySec[sec].last_marked_by).toMatchObject({ id: expect.any(String) });
+    expect(bySec[sec].last_marked_by.name.length).toBeGreaterThan(0);
+    expect(typeof bySec[sec].last_marked_at).toBe('string');
+    expect(bySec[sec]).toHaveProperty('class_teacher', null);
+    expect(bySec[sec2]).toMatchObject({ last_marked_by: null, last_marked_at: null });
+    expect(d).toHaveProperty('day_off');
     expect(bySec[sec2]).toMatchObject({
       state: 'NOT_STARTED',
       roster_size: 1,
@@ -2172,6 +2179,29 @@ describe('reports (hand-computed fixtures)', () => {
     expect(row).toMatchObject({ state: 'FINAL', roster_size: 4, marked_count: 4 });
     expect(row.counts).toMatchObject({ present: 1, absent: 2, half_day: 1 });
     expect((await ra.get(`/attendance/today?date=${inDays(5)}`)).status).toBe(422);
+  });
+
+  it("today's dashboard says why a day is off, per section (holiday for one section)", async () => {
+    const cats = (await ra.get('/calendar/categories')).body.data as { id: string; code: string }[];
+    const holiday = cats.find((x) => x.code === 'HOLIDAY')!;
+    const day = dayN(40); // outside the report month, so the report fixtures are untouched
+    const ev = await ra.post('/calendar/events', {
+      category_id: holiday.id,
+      title: 'R2 outing',
+      start_date: day,
+      end_date: day,
+      audience: 'SECTIONS',
+      section_ids: [sec2],
+    });
+    expect(ev.status, JSON.stringify(ev.body)).toBe(201);
+    const d = (await ra.get(`/attendance/today?date=${day}`)).body.data;
+    const bySec = Object.fromEntries(
+      d.sections.map((s: { section: { id: string } }) => [s.section.id, s]),
+    );
+    expect(bySec[sec2].day_off).toEqual({ reason: 'HOLIDAY', name: 'R2 outing' });
+    // the rest of the school is open unless that date is a weekly off
+    if (d.day_off === null) expect(bySec[sec].day_off).toBeNull();
+    else expect(bySec[sec].day_off).toMatchObject({ reason: 'WEEKLY_OFF' });
   });
 
   it('exports CSV (audited, permission-gated, formula-safe)', async () => {

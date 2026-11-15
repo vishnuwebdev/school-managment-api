@@ -241,9 +241,18 @@ export function createPipeline(deps: Deps, svc: PipelineServices): Pipeline {
   }
 
   // ---- Permission + entitlement
-  const authorizeMw = (permissions: string[]): RequestHandler =>
+  const authorizeMw = (permissions: string[], features: string[] = []): RequestHandler =>
     handler(async (req, _res, next) => {
       authorize(req.ctx.principal!, req.ctx.tenant, permissions);
+      const tenant = req.ctx.tenant;
+      for (const feature of features) {
+        if (tenant && !tenant.entitlements.features.includes(feature))
+          throw new AuthorizationError(
+            'FEATURE_NOT_ENABLED',
+            'This feature is not enabled for your school',
+            { feature },
+          );
+      }
       next();
     });
 

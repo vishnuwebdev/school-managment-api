@@ -77,15 +77,22 @@ async function classTeacher(section: string) {
 async function grantTeacherApp() {
   const res = await A.root.put(
     `/platform/tenants/${A.tenantId}/entitlements/overrides/teachers.mobile_app`,
-    { effect: 'GRANT', reason: 'School bought the teacher app add-on' },
+    { effect: 'GRANT', reason: 'Teacher app switched on for this school' },
   );
   expect(res.status, JSON.stringify(res.body)).toBe(200);
   await h.flushTenantCache(A.tenantId);
 }
 
 describe('teacher app API', () => {
-  it('is a paid add-on: refused until the school has it', async () => {
+  it('comes with every plan, and is refused when switched off for the school', async () => {
     const t = await classTeacher(secA);
+    expect((await t.api.get('/teacher/today')).status).toBe(200);
+    const off = await A.root.put(
+      `/platform/tenants/${A.tenantId}/entitlements/overrides/teachers.mobile_app`,
+      { effect: 'DENY', reason: 'Switched off for this school' },
+    );
+    expect(off.status, JSON.stringify(off.body)).toBe(200);
+    await h.flushTenantCache(A.tenantId);
     expect(code(await t.api.get('/teacher/today'))).toBe('FEATURE_NOT_ENABLED');
     await grantTeacherApp();
     expect((await t.api.get('/teacher/today')).status).toBe(200);

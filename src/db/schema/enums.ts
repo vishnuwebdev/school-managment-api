@@ -412,11 +412,13 @@ export type PaymentMethod = (typeof PAYMENT_METHOD)[number];
 
 /**
  * What a payment can be recorded as. Payments are made outside the portal (no gateway, no card
- * data), so UPI and ONLINE_GATEWAY are never accepted for new payments; they stay in the enum only
- * so rows recorded earlier still read back.
+ * data): UPI here is money the school received on its own UPI ID and records by hand.
+ * ONLINE_GATEWAY is never accepted for new payments; it stays in the enum only so rows recorded
+ * earlier still read back.
  */
 export const RECORDABLE_PAYMENT_METHODS = [
   "CASH",
+  "UPI",
   "BANK_TRANSFER",
   "CHEQUE",
   "CARD",
@@ -476,7 +478,7 @@ export const BILLING_PAYMENT_METHOD = [
   "BANK_TRANSFER",
   "CHEQUE",
   "CARD",
-  "MOBILE_MONEY",
+  "UPI",
   "OTHER",
 ] as const;
 export type BillingPaymentMethod = (typeof BILLING_PAYMENT_METHOD)[number];

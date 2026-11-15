@@ -35,6 +35,7 @@ export function guardianAccessRoutes(svc: GuardianAccessService) {
       tags: TAG,
       access: 'tenant',
       permissions: ['students.guardians.manage'],
+      features: ['parent_portal'],
       params: IdParams,
       body: EnableAppAccessBody,
       status: 201,
@@ -50,6 +51,7 @@ export function guardianAccessRoutes(svc: GuardianAccessService) {
       tags: TAG,
       access: 'tenant',
       permissions: ['students.guardians.manage'],
+      features: ['parent_portal'],
       params: IdParams,
       body: AppPasswordBody,
       handler: async ({ params, body, req }) => ({
@@ -63,6 +65,7 @@ export function guardianAccessRoutes(svc: GuardianAccessService) {
       tags: TAG,
       access: 'tenant',
       permissions: ['students.guardians.manage'],
+      features: ['parent_portal'],
       params: IdParams,
       body: DisableAppAccessBody,
       handler: async ({ params, body, req }) => ({

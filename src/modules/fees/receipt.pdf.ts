@@ -1,4 +1,5 @@
 import { PDFDocument, rgb, StandardFonts } from 'pdf-lib';
+import { paymentMethodLabel } from '../../shared/payment-methods.js';
 import {
   colorOf,
   drawCentered,
@@ -27,14 +28,6 @@ export interface ReceiptPdfInput {
   recorded_by: string | null;
   notes: string | null;
 }
-
-const METHODS: Record<string, string> = {
-  CASH: 'Cash',
-  BANK_TRANSFER: 'Bank transfer (EFT)',
-  CHEQUE: 'Cheque',
-  CARD: 'Card at reception',
-  OTHER: 'Other',
-};
 
 /** A5 receipt: school header, who paid for whom, what it was applied to, and the total. */
 export async function renderReceipt(o: ReceiptPdfInput): Promise<Buffer> {
@@ -92,7 +85,7 @@ export async function renderReceipt(o: ReceiptPdfInput): Promise<Buffer> {
   row('Date received', o.received_on);
   row('Received from', o.received_from);
   row('For ltudent', `${o.student_name} (${o.student_number})`);
-  row('Method', METHODS[o.method] ?? o.method);
+  row('Method', paymentMethodLabel(o.method));
   if (o.reference) row('Reference', o.reference);
 
   y -= 8;

@@ -278,6 +278,28 @@ describe("grade fees and learner plans", () => {
     );
     const filtered = ok(await api.get(`/fees/tracker?class_id=${g9}`));
     expect(filtered.learners).toHaveLength(1);
+    // Year totals per student and the group filters (Behind, Paid in full, No plan, Due this month).
+    for (const l of t.learners) {
+      expect(cents(l.balance)).toBeLessThanOrEqual(cents(l.total));
+      expect(typeof l.paid_in_full).toBe("boolean");
+      if (l.next_due_date) expect(l.next_due_date >= t.today).toBe(true);
+    }
+    expect(t.counts.NO_PLAN).toBe(1);
+    expect(t.totals.no_plan).toBe(1);
+    expect(t.totals.month_end >= t.today).toBe(true);
+    const noPlan = ok(await api.get("/fees/tracker?status=NO_PLAN"));
+    expect(noPlan.learners.map((l: Json) => l.plan)).toEqual([null]);
+    const behind = ok(await api.get("/fees/tracker?status=BEHIND"));
+    expect(behind.learners.length).toBe(t.counts.BEHIND);
+    expect(behind.learners.every((l: Json) => cents(l.owing) > 0)).toBe(true);
+    const full = ok(await api.get("/fees/tracker?status=PAID_IN_FULL"));
+    expect(full.learners.length).toBe(t.totals.paid_in_full);
+    expect(full.learners.every((l: Json) => l.paid_in_full && cents(l.balance) === 0)).toBe(true);
+    const month = ok(await api.get("/fees/tracker?status=DUE_THIS_MONTH"));
+    expect(month.learners.length).toBe(t.totals.learners_due_this_month);
+    expect(
+      cents(t.totals.due_this_month),
+    ).toBe(month.learners.reduce((a: number, l: Json) => a + cents(l.due_this_month), 0));
     const csv = await api.get("/fees/tracker/export");
     expect(csv.status).toBe(200);
   });

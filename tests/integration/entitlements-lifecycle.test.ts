@@ -9,29 +9,29 @@ afterAll(() => h.close());
 
 describe('entitlements — permission AND tenant entitlement are both required', () => {
   it('denies a permitted action when the plan lacks the feature, and follows overrides and plan changes', async () => {
-    const S = await h.provisionSchool({ plan: 'STANDARD' });
-    // School Admin holds transport.read, but STANDARD has no transport.
-    const denied = await S.admin.api.get('/_probe/transport');
+    const S = await h.provisionSchool({ plan: 'STANDARD', customRoles: false });
+    // School Admin holds roles.create, but STANDARD has no custom roles.
+    const denied = await S.admin.api.get('/_probe/custom-roles');
     expect(denied.status).toBe(403);
     expect(code(denied)).toBe('FEATURE_NOT_ENABLED');
-    expect(denied.body.error.details.feature).toBe('transport');
+    expect(denied.body.error.details.feature).toBe('custom_roles');
 
     const grant = await S.root.put(
-      `/platform/tenants/${S.tenantId}/entitlements/overrides/transport`,
+      `/platform/tenants/${S.tenantId}/entitlements/overrides/custom_roles`,
       { effect: 'GRANT', reason: 'Pilot' },
     );
     expect(grant.status).toBe(200);
-    expect(grant.body.data.features).toContain('transport');
-    expect((await S.admin.api.get('/_probe/transport')).status).toBe(200);
+    expect(grant.body.data.features).toContain('custom_roles');
+    expect((await S.admin.api.get('/_probe/custom-roles')).status).toBe(200);
 
     expect(
       (
-        await S.root.delete(`/platform/tenants/${S.tenantId}/entitlements/overrides/transport`, {
+        await S.root.delete(`/platform/tenants/${S.tenantId}/entitlements/overrides/custom_roles`, {
           reason: 'Pilot over',
         })
       ).status,
     ).toBe(200);
-    expect(code(await S.admin.api.get('/_probe/transport'))).toBe('FEATURE_NOT_ENABLED');
+    expect(code(await S.admin.api.get('/_probe/custom-roles'))).toBe('FEATURE_NOT_ENABLED');
 
     const upgrade = await S.root.post(`/platform/tenants/${S.tenantId}/subscriptions`, {
       plan_code: 'PREMIUM',
@@ -40,7 +40,7 @@ describe('entitlements — permission AND tenant entitlement are both required',
       reason: 'Upgrade',
     });
     expect(upgrade.status).toBe(201);
-    expect((await S.admin.api.get('/_probe/transport')).status).toBe(200);
+    expect((await S.admin.api.get('/_probe/custom-roles')).status).toBe(200);
 
     const history = await S.root.get(`/platform/tenants/${S.tenantId}/subscriptions`);
     expect(

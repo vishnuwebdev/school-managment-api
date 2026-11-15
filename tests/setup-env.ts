@@ -9,3 +9,6 @@ process.env.LOG_LEVEL = 'silent';
 process.env.CACHE_TTL_SECONDS = '60';
 process.env.APP_BASE_URL = 'http://app.test';
 process.env.STORAGE_DIR = `${process.env.TMPDIR ?? '/tmp'}/sms-test-storage`;
+// Most suites exercise the full model (plans, sub-users); they keep that code working while it
+// is switched off. tests/integration/simple-mode.test.ts covers the simple mode the product runs.
+process.env.PRODUCT_MODE = process.env.PRODUCT_MODE ?? 'full';

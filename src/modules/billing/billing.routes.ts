@@ -1,5 +1,6 @@
-import type { Request, Response } from 'express';
+import type { Request } from 'express';
 import { z } from 'zod';
+import { sendPdf } from '../../http/pdf.js';
 import { defineRoute } from '../../http/route.js';
 import { actorFrom, type Actor } from '../../platform/context.js';
 import type { BillingService } from './billing.service.js';
@@ -14,19 +15,6 @@ import {
 
 const T_PLATFORM = ['Platform · Billing'];
 const T_SCHOOL = ['School · Billing'];
-
-function sendPdf(res: Response, f: { data: Buffer; filename: string }) {
-  res
-    .status(200)
-    .set({
-      'Content-Type': 'application/pdf',
-      'Content-Length': String(f.data.length),
-      'Content-Disposition': `inline; filename="${f.filename}"`,
-      'Cache-Control': 'private, no-store',
-      'X-Content-Type-Options': 'nosniff',
-    })
-    .end(f.data);
-}
 
 /** Invoices and offline payments for school subscriptions. */
 export function billingRoutes(svc: BillingService) {

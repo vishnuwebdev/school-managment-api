@@ -71,6 +71,7 @@ const SCOPE_SUPPORT: Readonly<Record<string, Exclude<ScopeSupport, 'TENANT_WIDE'
   'fees.manage': 'PLACEMENT',
   'fees.payments.create': 'PLACEMENT',
   'fees.payments.verify': 'PLACEMENT',
+  'fees.payments.cancel': 'PLACEMENT',
   'fees.concessions.request': 'PLACEMENT',
   'fees.refunds.request': 'PLACEMENT',
   'fees.refunds.approve': 'PLACEMENT',
@@ -241,6 +242,8 @@ export const PERMISSIONS: readonly PermissionDef[] = [
   t('fees.structures.publish', 'Publish and archive fee structures', 'fees', true),
   t('fees.payments.create', 'Record payments', 'fees'),
   t('fees.payments.verify', 'Verify payments', 'fees', true),
+  // Only the School Admin holds it among system roles (owner, 2026-11-09).
+  t('fees.payments.cancel', 'Cancel payments recorded in error', 'fees', true),
   t('fees.concessions.request', 'Request fee concessions and waivers', 'fees.concessions'),
   t('fees.refunds.request', 'Request refunds', 'fees.refunds'),
   t('fees.refunds.approve', 'Approve refunds', 'fees.refunds', true),
@@ -267,21 +270,13 @@ export const PERMISSIONS: readonly PermissionDef[] = [
   t('communication.notices.post', 'Post notices to own classes (teacher app)', 'communication'),
   t('communication.messages.send', 'Send bulk messages', 'communication'),
 
-  // ---- Portal, library, transport, reports, integrations -------------------
+  // ---- Portal and reports ------------------------------------------------------
   t('portal.access', 'Use the parent / guardian portal', 'parent_portal'),
   t('feedback.read', 'View parent feedback and suggestions', 'parent_portal'),
   t('feedback.respond', 'Reply to parent feedback and change its status', 'parent_portal'),
   t('feedback.complaints', 'See and handle parent complaints (principal)', 'parent_portal'),
-  t('library.read', 'View library', 'library'),
-  t('library.manage', 'Manage library catalogue', 'library'),
-  t('library.circulate', 'Issue and return books', 'library'),
-  t('library.fines.waive', 'Waive library fines', 'library', true),
-  t('transport.read', 'View transport', 'transport'),
-  t('transport.manage', 'Manage routes, vehicles and drivers', 'transport'),
-  t('transport.assign', 'Assign students to transport', 'transport'),
   t('reports.read', 'View reports', 'reports'),
   t('reports.export', 'Export reports', 'reports'),
-  t('integrations.manage', 'Manage integrations', 'integrations', true),
 ];
 
 export const PERMISSION_CODES = new Set(PERMISSIONS.map((x) => x.code));

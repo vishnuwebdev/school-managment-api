@@ -1105,7 +1105,7 @@ export class PaymentService {
           c.tenantId,
           id,
           c.principal,
-          'fees.payments.verify',
+          'fees.payments.cancel',
           'update',
         );
         if (!['PENDING', 'RECEIVED', 'VERIFIED'].includes(p.status))

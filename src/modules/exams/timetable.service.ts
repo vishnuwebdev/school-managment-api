@@ -109,7 +109,7 @@ const isoWeekday = (iso: string) => {
   return d === 0 ? 7 : d;
 };
 const DAY = ['', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
-const teacherName = (t: { firstName: string; lastName: string; preferredName: string | null }) =>
+export const teacherName = (t: { firstName: string; lastName: string; preferredName: string | null }) =>
   `${t.preferredName || t.firstName} ${t.lastName}`.trim();
 const uniq = <T>(xs: T[]) => [...new Set(xs)];
 

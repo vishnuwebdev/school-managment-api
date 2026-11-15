@@ -119,6 +119,64 @@ export function resolveEntitlements(input: {
   };
 }
 
+/**
+ * Simple product mode: every active catalog feature, except
+ * - the switched-off sub-user features,
+ * - an app feature (Teacher app, Parent app) without an active GRANT override, and what only
+ *   makes sense with that app,
+ * - anything denied by an override,
+ * then the usual dependency closure. There is no subscription, so access is always FULL.
+ */
+export function resolveSimpleEntitlements(input: {
+  catalog: FeatureNode[];
+  rows: EntitlementRow[];
+  appFeatures: readonly string[];
+  appLinked: Record<string, readonly string[]>;
+  off: readonly string[];
+  now: Date;
+}): EntitlementSnapshot {
+  const { catalog, rows, now } = input;
+  const valid = (r: EntitlementRow) => r.startsAt <= now && (r.endsAt === null || r.endsAt > now);
+  const overrides = rows.filter((r) => r.sourceType === 'ADMIN_OVERRIDE' && valid(r));
+  const granted = new Set(catalog.map((f) => f.code));
+  for (const code of input.off) granted.delete(code);
+
+  const blocked: BlockedFeature[] = [];
+  for (const app of input.appFeatures) {
+    const on = overrides.some((r) => r.featureCode === app && r.effect === 'GRANT');
+    if (on) continue;
+    for (const code of [app, ...(input.appLinked[app] ?? [])]) granted.delete(code);
+  }
+  for (const r of overrides) {
+    if (r.effect === 'DENY' && granted.delete(r.featureCode))
+      blocked.push({ feature: r.featureCode, reason: 'DENIED_BY_OVERRIDE' });
+  }
+  for (const f of catalog) if (f.isCore) granted.add(f.code);
+
+  const byCode = new Map(catalog.map((f) => [f.code, f]));
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const code of [...granted]) {
+      const missing = (byCode.get(code)?.dependsOn ?? []).filter((d) => !granted.has(d));
+      if (missing.length > 0) {
+        granted.delete(code);
+        blocked.push({ feature: code, reason: 'DEPENDENCY_MISSING', missing });
+        changed = true;
+      }
+    }
+  }
+
+  return {
+    accessMode: 'FULL',
+    subscription: { id: null, status: 'NONE', planCode: null, expiredAt: null, graceEndsAt: null },
+    features: [...granted].sort(),
+    blocked,
+    limits: { maxStaffUsers: null, maxStudents: null },
+    resolvedAt: now.toISOString(),
+  };
+}
+
 /** Features that (transitively) depend on `code` — shown before disabling it. */
 export function dependentsOf(catalog: FeatureNode[], code: string): string[] {
   const out = new Set<string>();

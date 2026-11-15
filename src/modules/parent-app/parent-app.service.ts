@@ -38,10 +38,12 @@ import type { FeeDocumentService } from '../fees/documents.service.js';
 import type { LearnerFeesService } from '../fees/learner-fees.service.js';
 import type { FileService } from '../files/files.service.js';
 import type { ChildPlacement, NoticeService } from '../notices/notices.service.js';
-import type { PdfBranding } from '../students/certificates.pdf.js';
 import type { SchoolSetupService } from '../tenants/school-setup.service.js';
 import { fullName } from '../teachers/support.js';
-import { renderFeeInvoice, renderReportCard } from './documents.pdf.js';
+import { renderFeeInvoice } from './documents.pdf.js';
+import { loadPdfBranding } from '../tenants/pdf-branding.js';
+import type { ReportCardService } from '../exams/report-cards.service.js';
+import { paymentMethodLabel } from '../../shared/payment-methods.js';
 
 export const RangeQuery = z.object({
   from: z.iso.date().optional(),
@@ -136,6 +138,7 @@ export class ParentAppService {
       calendar: CalendarService;
       exams: ExamService;
       remarks: ExamRemarkService;
+      reportCards: ReportCardService;
       learnerFees: LearnerFeesService;
       feeDocuments: FeeDocumentService;
       schoolSetup: SchoolSetupService;
@@ -299,26 +302,8 @@ export class ParentAppService {
     };
   }
 
-  private async branding(
-    tenantId: string,
-  ): Promise<PdfBranding & { raw: Awaited<ReturnType<SchoolSetupService['documentBranding']>> }> {
-    const b = await this.s.schoolSetup.documentBranding(tenantId);
-    let logo: { bytes: Buffer; mime: string } | null = null;
-    if (b.logo_file_id) {
-      const f = await this.s.files.read(tenantId, b.logo_file_id).catch(() => null);
-      if (f) logo = { bytes: f.data, mime: f.mime };
-    }
-    return {
-      raw: b,
-      school_name: b.school_name,
-      address: [b.address.line1, b.address.line2, b.address.city, b.address.postal_code]
-        .filter(Boolean)
-        .join(', '),
-      contact: [b.phone, b.email].filter(Boolean).join('  ·  '),
-      footer_text: b.footer_text,
-      primary_color: b.primary_color,
-      logo,
-    };
+  private branding(tenantId: string) {
+    return loadPdfBranding(this.s, tenantId);
   }
 
   // ---- account ------------------------------------------------------------------------------
@@ -341,7 +326,7 @@ export class ParentAppService {
         first_name: g.firstName,
         last_name: g.lastName,
         full_name: [g.firstName, g.middleName, g.lastName].filter(Boolean).join(' '),
-        email: u && !u.email.endsWith('@parents.invalid') ? u.email : g.email,
+        email: u?.email ?? g.email,
         mobile: g.phone ?? (u?.loginPhone ? `+${u.loginPhone}` : null),
         preferred_language: g.preferredLanguage,
       },
@@ -615,39 +600,9 @@ export class ParentAppService {
   }
 
   async reportCardPdf(c0: Caller, studentId: string, examId: string) {
-    const card = await this.reportCard(c0, studentId, examId);
-    const b = await this.branding(c0.tenantId);
-    const [y] = await this.db
-      .select({ name: academicYears.name })
-      .from(exams)
-      .innerJoin(academicYears, eq(academicYears.id, exams.academicYearId))
-      .where(and(eq(exams.tenantId, c0.tenantId), eq(exams.id, examId)));
-    const st = card.student;
-    const data = await renderReportCard({
-      branding: b,
-      exam_name: card.exam_name,
-      academic_year: y?.name ?? null,
-      published_on: card.published_at?.slice(0, 10) ?? null,
-      student_name: st.full_name,
-      admission_number: st.admission_number,
-      class_label: [st.class?.name, st.section?.name].filter(Boolean).join(' · ') || '-',
-      roll_number: st.roll_number,
-      subjects: card.subjects,
-      total: card.total,
-      max_total: card.max_total,
-      percentage: card.percentage,
-      grade: card.grade,
-      result: card.result,
-      rank: card.rank,
-      class_size: card.class_size,
-      class_average: card.class_average,
-      remark: card.remark ? { text: card.remark, by: card.remark_by } : null,
-      generated_on: iso(this.deps.clock.now()),
-    });
-    const safeName = `${st.full_name}-${card.exam_name}`
-      .replace(/[^\w\- ]+/g, '')
-      .replace(/\s+/g, '-');
-    return { data, filename: `Report-card-${safeName}.pdf` };
+    // Proves the child is the parent's own and the exam is published for them (404 otherwise).
+    await this.reportCard(c0, studentId, examId);
+    return this.s.reportCards.studentPdf(asSchool(c0), examId, studentId);
   }
 
   /**
@@ -816,13 +771,6 @@ export class ParentAppService {
             : m(d.d.paidAmount) > 0n
               ? 'PARTIALLY_PAID'
               : 'ISSUED';
-    const METHOD: Record<string, string> = {
-      CASH: 'Cash',
-      BANK_TRANSFER: 'Bank transfer',
-      CHEQUE: 'Cheque',
-      CARD: 'Card',
-      OTHER: 'Other',
-    };
     const e = c.enrollment;
     const data = await renderFeeInvoice({
       branding: await this.branding(c0.tenantId),
@@ -851,7 +799,7 @@ export class ParentAppService {
           net: m(a.allocatedAmount) - m(a.reversedAmount),
           date: p.receivedOn,
           receipt_number: receiptNumber,
-          method: METHOD[p.method] ?? p.method,
+          method: paymentMethodLabel(p.method),
         }))
         .filter((x) => x.net > 0n)
         .map(({ net, ...x }) => ({ ...x, amount: fromMinor(net) })),

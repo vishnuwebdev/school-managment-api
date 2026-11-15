@@ -7,14 +7,22 @@ import type { Actor } from '../../platform/context.js';
 import { publishEvent } from '../../platform/outbox.js';
 import { BusinessRuleError } from '../../shared/errors.js';
 import { deletePin } from '../identity/app-pin.js';
+import { assertLoginPhoneFree } from '../identity/login-phone.js';
+
+/** Memberships are keyed by school id, or 'PLATFORM' for platform staff (tenantId null). */
+const keyOf = (tenantId: string | null) => tenantId ?? 'PLATFORM';
 
 /**
- * A school may set the password only of an account that is used for that
- * school alone. Accounts are shared across schools (one user, many
- * memberships), so changing the password of someone who also works elsewhere,
- * or at the platform, would take over their other access.
+ * A school (or the platform team, tenantId null) may set the password or sign-in mobile only of
+ * an account that is used there alone. Accounts are shared (one user, many memberships), so
+ * changing the credentials of someone who also works at another school, or at the platform,
+ * would take over their other access.
  */
-export async function assertAccountManagedBy(tx: Executor, userId: string, tenantId: string) {
+export async function assertAccountManagedBy(
+  tx: Executor,
+  userId: string,
+  tenantId: string | null,
+) {
   const elsewhere = await tx
     .select({ id: memberships.id })
     .from(memberships)
@@ -22,20 +30,23 @@ export async function assertAccountManagedBy(tx: Executor, userId: string, tenan
       and(
         eq(memberships.userId, userId),
         ne(memberships.status, 'REVOKED'),
-        ne(memberships.tenantKey, tenantId),
+        ne(memberships.tenantKey, keyOf(tenantId)),
       ),
     )
     .limit(1);
   if (elsewhere.length)
     throw new BusinessRuleError(
       'OPERATION_NOT_ALLOWED',
-      'This email already signs in to another school. Only its owner can change the password ' +
-        '(Forgot password). Send an invitation instead.',
+      tenantId
+        ? 'This email or mobile number already signs in to another school. Only its owner can ' +
+            'change the password. Send an invitation by email instead.'
+        : 'This email or mobile number also signs in to a school. Only its owner can change the ' +
+            'password. Send an invitation by email instead.',
     );
 }
 
 /**
- * Give a school login a password chosen by an admin, in the caller's
+ * Give a school login (or a platform login, tenantId null) a password chosen by an admin, in the caller's
  * transaction: a pending invitation is accepted on the person's behalf (the
  * emailed link stops working), the account becomes active, every session of
  * the account ends and the app PIN is cleared. The caller has already checked
@@ -44,14 +55,16 @@ export async function assertAccountManagedBy(tx: Executor, userId: string, tenan
 export async function setPasswordByAdmin(
   deps: Deps,
   tx: Executor,
-  input: { tenantId: string; membershipId: string; passwordHash: string; reason: string },
+  input: { tenantId: string | null; membershipId: string; passwordHash: string; reason: string },
   actor: Actor,
 ) {
   const [m] = await tx
     .select({ m: memberships, u: users })
     .from(memberships)
     .innerJoin(users, eq(users.id, memberships.userId))
-    .where(and(eq(memberships.id, input.membershipId), eq(memberships.tenantId, input.tenantId)))
+    .where(
+      and(eq(memberships.id, input.membershipId), eq(memberships.tenantKey, keyOf(input.tenantId))),
+    )
     .for('update');
   if (!m || m.m.status === 'REVOKED')
     throw new BusinessRuleError('INVALID_STATE', 'This login has been removed');
@@ -91,7 +104,8 @@ export async function setPasswordByAdmin(
     .update(userSessions)
     .set({ revokedAt: now, revokedReason: 'PASSWORD_RESET' })
     .where(and(eq(userSessions.userId, m.u.id), isNull(userSessions.revokedAt)));
-  await deletePin(tx, input.tenantId, input.membershipId);
+  // App PINs exist only for school logins.
+  if (input.tenantId) await deletePin(tx, input.tenantId, input.membershipId);
 
   await recordAudit(tx, actor, {
     tenantId: input.tenantId,
@@ -111,4 +125,41 @@ export async function setPasswordByAdmin(
       payload: { membership_id: input.membershipId, user_id: m.u.id },
     });
   return { activated };
+}
+
+/**
+ * Change (or remove, with null) the mobile number a school (or platform) login signs in with, in the caller's
+ * transaction. The number must be free; a login keeps at least one of email and mobile.
+ */
+export async function setLoginPhoneByAdmin(
+  tx: Executor,
+  input: { tenantId: string | null; membershipId: string; loginPhone: string | null },
+  actor: Actor,
+) {
+  const [m] = await tx
+    .select({ m: memberships, u: users })
+    .from(memberships)
+    .innerJoin(users, eq(users.id, memberships.userId))
+    .where(
+      and(eq(memberships.id, input.membershipId), eq(memberships.tenantKey, keyOf(input.tenantId))),
+    )
+    .for('update');
+  if (!m || m.m.status === 'REVOKED')
+    throw new BusinessRuleError('INVALID_STATE', 'This login has been removed');
+  await assertAccountManagedBy(tx, m.u.id, input.tenantId);
+  if (!input.loginPhone && !m.u.email)
+    throw new BusinessRuleError(
+      'OPERATION_NOT_ALLOWED',
+      'This login has no email, so it needs a mobile number to sign in',
+    );
+  if (input.loginPhone) await assertLoginPhoneFree(tx, input.loginPhone, m.u.id);
+  await tx.update(users).set({ loginPhone: input.loginPhone }).where(eq(users.id, m.u.id));
+  await recordAudit(tx, actor, {
+    tenantId: input.tenantId,
+    action: 'MEMBER_LOGIN_PHONE_CHANGED',
+    entityType: 'membership',
+    entityId: input.membershipId,
+    before: { login_phone: m.u.loginPhone },
+    after: { login_phone: input.loginPhone },
+  });
 }

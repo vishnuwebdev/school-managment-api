@@ -21,6 +21,9 @@ const TokensResponse = z
   })
   .openapi('Tokens');
 
+/** Which app signs in. The admin panel sends `admin`, the mobile apps `teacher` / `parent`. */
+const ClientAppField = z.enum(['admin', 'teacher', 'parent']).optional();
+
 const Device = z
   .object({
     device_name: z.string().max(100).optional(),
@@ -46,6 +49,7 @@ export function authRoutes(auth: AuthService) {
           /** Required when the user belongs to more than one school. */
           membership_id: z.string().uuid().optional(),
           device: Device,
+          app: ClientAppField,
         })
         .refine((b) => !!b.email !== !!b.phone, {
           message: 'Send either email or phone',
@@ -60,6 +64,7 @@ export function authRoutes(auth: AuthService) {
             password: body.password,
             membershipId: body.membership_id,
             device: { deviceName: body.device?.device_name, deviceType: body.device?.device_type },
+            app: body.app,
           },
           req.ctx.meta,
         ),
@@ -127,9 +132,14 @@ export function authRoutes(auth: AuthService) {
       summary: 'Switch to another school (or the platform) the user belongs to',
       tags: ['Auth'],
       access: 'authenticated',
-      body: z.object({ membership_id: z.string().uuid() }),
+      body: z.object({ membership_id: z.string().uuid(), app: ClientAppField }),
       handler: async ({ body, req }) => ({
-        data: await auth.switchContext(req.ctx.principal!, body.membership_id, req.ctx.meta),
+        data: await auth.switchContext(
+          req.ctx.principal!,
+          body.membership_id,
+          req.ctx.meta,
+          body.app,
+        ),
       }),
     }),
 

@@ -7,6 +7,8 @@ import { actorFrom, type Actor } from '../../platform/context.js';
 import { PaginationQuery } from '../../shared/pagination.js';
 import type { EntitlementService } from '../entitlements/entitlements.service.js';
 import {
+  AdminMobileBody,
+  AppsBody,
   AdminPasswordBody,
   ChangeSubscriptionBody,
   CreateTenantBody,
@@ -110,6 +112,24 @@ export function platformTenantRoutes(tenantsSvc: TenantService, entitlements: En
     }),
     defineRoute({
       method: 'put',
+      path: '/platform/tenants/:id/admins/:membershipId/mobile',
+      summary: 'Change (or remove, with null) the mobile number a school admin signs in with',
+      tags: ['Platform · Schools'],
+      access: 'platform',
+      permissions: ['platform.tenants.provision'],
+      params: IdParams.extend({ membershipId: z.string().uuid() }),
+      body: AdminMobileBody,
+      handler: async ({ params, body, req }) => ({
+        data: await tenantsSvc.setAdminMobile(
+          params.id,
+          params.membershipId,
+          body.mobile,
+          platformActor(req, params.id),
+        ),
+      }),
+    }),
+    defineRoute({
+      method: 'put',
       path: '/platform/tenants/:id/admins/:membershipId/password',
       summary: "Set or reset a school admin's password (signs them out everywhere)",
       tags: ['Platform · Schools'],
@@ -124,6 +144,21 @@ export function platformTenantRoutes(tenantsSvc: TenantService, entitlements: En
           body.password,
           platformActor(req, params.id),
         ),
+      }),
+    }),
+    defineRoute({
+      method: 'put',
+      path: '/platform/tenants/:id/apps',
+      summary:
+        'Switch the Teacher app and/or Parent app on or off for a school (simple mode). ' +
+        'Switching an app off signs its teachers / parents out at once.',
+      tags: ['Platform · Schools'],
+      access: 'platform',
+      permissions: ['platform.entitlements.override'],
+      params: IdParams,
+      body: AppsBody,
+      handler: async ({ params, body, req }) => ({
+        data: await tenantsSvc.setApps(params.id, body, platformActor(req, params.id)),
       }),
     }),
     defineRoute({

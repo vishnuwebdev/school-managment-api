@@ -199,6 +199,11 @@ describe('teacher app: exams and marks', () => {
       (e: { id: string }) => e.id === t.body.data.exam_id,
     );
     expect(office.by_teacher).toBe(true);
+    // One section: the card label names the class and section, and who set the test.
+    expect(office.class_names).toHaveLength(1);
+    expect(office.class_label).toContain(office.class_names[0]);
+    expect(office.class_label).not.toBe(office.class_names[0]);
+    expect(typeof office.teacher_name).toBe('string');
     const m = await teacher.api.get(`/teacher/papers/${t.body.data.paper_id}/marks`);
     expect(m.body.data.rows.map((r: { student_id: string }) => r.student_id)).toEqual([inA]);
     expect((await teacher.api.delete(`/teacher/tests/${t.body.data.exam_id}`)).status).toBe(204);

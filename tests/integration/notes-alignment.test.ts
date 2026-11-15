@@ -70,7 +70,7 @@ describe('platform support scoped to selected schools', () => {
 
 describe('subscriptions', () => {
   it('a downgrade that removes features needs confirmation, and replaced subscriptions are SUPERSEDED', async () => {
-    const S = await h.provisionSchool({ plan: 'PREMIUM' });
+    const S = await h.provisionSchool({ plan: 'PREMIUM', customRoles: false });
     const down = await S.root.post(`/platform/tenants/${S.tenantId}/subscriptions`, {
       plan_code: 'STARTER',
       reason: 'Budget cut',
@@ -78,9 +78,9 @@ describe('subscriptions', () => {
     expect(down.status).toBe(409);
     expect(code(down)).toBe('CONFIRMATION_REQUIRED');
     expect(down.body.error.details.lost_features).toEqual(
-      expect.arrayContaining(['transport', 'fees', 'library']),
+      expect.arrayContaining(['custom_roles', 'fees', 'attendance.subject']),
     );
-    expect((await S.admin.api.get('/_probe/transport')).status).toBe(200); // unchanged
+    expect((await S.admin.api.get('/_probe/custom-roles')).status).toBe(200); // unchanged
 
     const ok = await S.root.post(`/platform/tenants/${S.tenantId}/subscriptions`, {
       plan_code: 'STARTER',

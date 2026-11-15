@@ -84,6 +84,8 @@ export const SaveMarksBody = z.object({
 });
 
 export const ResultsQuery = z.object({ class_id: z.uuid() });
+export const ReportCardParams = z.object({ id: z.uuid(), student_id: z.uuid() });
+export const SectionReportCardsQuery = z.object({ section_id: z.uuid() });
 
 /** The office returns a section's handed-in marks to the teacher. */
 export const ReturnMarksBody = z.object({

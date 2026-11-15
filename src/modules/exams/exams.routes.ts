@@ -1,7 +1,9 @@
 import type { Request } from 'express';
+import { sendPdf } from '../../http/pdf.js';
 import { defineRoute } from '../../http/route.js';
 import { actorFrom } from '../../platform/context.js';
 import { GRADE_SCALE, type ExamService } from './exams.service.js';
+import type { ReportCardService } from './report-cards.service.js';
 import type { ExamTimetableService } from './timetable.service.js';
 import {
   AddClassesBody,
@@ -15,10 +17,12 @@ import {
   PaperParams,
   PaperScheduleBody,
   PublishBody,
+  ReportCardParams,
   ResultsQuery,
   ReturnMarksBody,
   SaveMarksBody,
   SectionParams,
+  SectionReportCardsQuery,
   SectionScheduleBody,
   StudentParams,
   UpdateExamBody,
@@ -32,12 +36,17 @@ const ctx = (req: Request) => ({
 
 const TAG = ['School · Examinations'];
 
-export function examRoutes(svc: ExamService, tt: ExamTimetableService) {
+export function examRoutes(svc: ExamService, tt: ExamTimetableService, cards: ReportCardService) {
+  const caller = (req: Request) => ({
+    tenantId: req.ctx.tenant!.tenantId,
+    principal: req.ctx.principal!,
+  });
   return [
     defineRoute({
       method: 'get',
       path: '/exams',
-      summary: 'Exams with their progress (stage, papers, marks entered). Filters: status, year_id',
+      summary:
+        'Exams with their progress (stage, papers, marks entered) and card labels (class_names, class_label, teacher_name). Filters: status, year_id',
       tags: TAG,
       access: 'tenant',
       permissions: ['exams.read'],
@@ -276,7 +285,7 @@ export function examRoutes(svc: ExamService, tt: ExamTimetableService) {
     defineRoute({
       method: 'get',
       path: '/exams/papers/:paper_id/marks',
-      summary: 'The class list for a paper with each student’s marks',
+      summary: 'The class list for a paper with each student’s marks, section and roll number',
       tags: TAG,
       access: 'tenant',
       permissions: ['exams.read'],
@@ -335,6 +344,31 @@ export function examRoutes(svc: ExamService, tt: ExamTimetableService) {
       handler: async ({ params, query, req }) => ({
         data: await svc.results(ctx(req).tenantId, params.id, query.class_id),
       }),
+    }),
+    defineRoute({
+      method: 'get',
+      path: '/exams/:id/report-cards/pdf',
+      summary:
+        'Report cards of one section as one PDF (a page per student, in roll-number order). Published exams only',
+      tags: TAG,
+      access: 'tenant',
+      permissions: ['exams.read'],
+      params: IdParams,
+      query: SectionReportCardsQuery,
+      handler: async ({ params, query, req, res }) =>
+        sendPdf(res, await cards.sectionPdf(caller(req), params.id, query.section_id)),
+    }),
+    defineRoute({
+      method: 'get',
+      path: '/exams/:id/report-cards/:student_id/pdf',
+      summary:
+        'Report card PDF of one student (same layout as the parent app). Published exams only',
+      tags: TAG,
+      access: 'tenant',
+      permissions: ['exams.read'],
+      params: ReportCardParams,
+      handler: async ({ params, req, res }) =>
+        sendPdf(res, await cards.studentPdf(caller(req), params.id, params.student_id)),
     }),
     defineRoute({
       method: 'get',

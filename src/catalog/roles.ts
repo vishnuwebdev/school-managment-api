@@ -4,6 +4,8 @@ import { expandPermissionPatterns } from './permissions.js';
  * System roles. These are starting bundles of permissions, not hard-coded
  * behaviour: code never checks role codes. Schools cannot edit system roles,
  * but can create custom roles (e.g. a "Sub Admin" with selected permissions).
+ * A role removed from this list is archived by the seed (its assignments stop granting
+ * anything); Librarian and Transport Manager were removed 2026-11-09 with their features.
  */
 export interface SystemRoleDef {
   code: string;
@@ -31,8 +33,6 @@ const TENANT_READ_ONLY = [
   'fees.read',
   'timetable.read',
   'communication.read',
-  'library.read',
-  'transport.read',
   'reports.read',
 ];
 
@@ -244,20 +244,6 @@ export const SYSTEM_ROLES: SystemRoleDef[] = [
       'feedback.read',
       'feedback.respond',
     ],
-  },
-  {
-    code: 'LIBRARIAN',
-    name: 'Librarian',
-    description: 'Library catalogue and circulation.',
-    scope: 'TENANT',
-    permissions: ['students.read', 'library.*', 'communication.read'],
-  },
-  {
-    code: 'TRANSPORT_MANAGER',
-    name: 'Transport Manager',
-    description: 'Routes, vehicles and student transport.',
-    scope: 'TENANT',
-    permissions: ['students.read', 'transport.*', 'communication.read'],
   },
   {
     code: 'PARENT',

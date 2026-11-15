@@ -106,8 +106,15 @@ export const UpdateTeacherBody = z.object({
   last_name: TeacherFields.last_name.optional(),
 });
 
+/** Status groups for the list's quick filters: everyone still with the school, people still joining, people who left. */
+export const TEACHER_STATUS_GROUPS = ['CURRENT', 'JOINING', 'LEFT'] as const;
+
 export const TeacherListQuery = PaginationQuery.extend({
   status: z.enum(TEACHER_STATUS).optional(),
+  /** CURRENT = not left · JOINING = prospective or onboarding · LEFT = inactive, resigned, terminated, retired or archived. */
+  status_group: z.enum(TEACHER_STATUS_GROUPS).optional(),
+  /** true = has at least one active teaching assignment, false = none. */
+  has_assignments: z.stringbool().optional(),
   employment_type: z.enum(EMPLOYMENT_TYPE).optional(),
   department: z.string().trim().min(1).max(100).optional(),
   /** true = has a linked login (membership), false = none. */
@@ -139,11 +146,14 @@ export const TeacherCommandBody = z.object({
 });
 
 export const PortalAccessBody = z.object({
-  role_id: z.uuid(),
+  /** Defaults to the built-in Teacher role (the only one in the simple product mode). */
+  role_id: z.uuid().optional(),
   /** ASSIGNED (default): only the sections the teacher is assigned to. ALL: school-wide. */
   scope: z.enum(['ASSIGNED', 'ALL']).default('ASSIGNED'),
-  /** Defaults to the teacher's email; required when the teacher has none. */
+  /** Defaults to the teacher's email. A login needs an email or a mobile number. */
   email: z.email().max(254).toLowerCase().optional(),
+  /** Mobile number the teacher signs in with (instead of, or as well as, the email). */
+  mobile: z.string().trim().min(7).max(32).optional(),
   /**
    * Set the password now instead of emailing an invitation: the login is active
    * at once. Not allowed when the email already signs in to another school.

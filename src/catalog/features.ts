@@ -2,6 +2,9 @@
  * Product capability catalog — the single source of truth for feature codes.
  * Seeded into `features` / `feature_dependencies`. Keep the hierarchy shallow
  * (feature → sub-feature). Dependencies are data, never hard-coded checks.
+ * List only features that have code: plans must never sell something unbuilt (library,
+ * transport, SMS, integrations, online payments and online results were removed 2026-11-09;
+ * the seed archives a removed code and takes it out of plans and school overrides).
  */
 export interface FeatureDef {
   code: string;
@@ -74,8 +77,6 @@ export const FEATURES = [
     dependsOn: ['teachers'],
   },
   {
-    // Paid add-on: not a capability, so no plan includes it automatically.
-    // Switched on per school (platform override today; an ADD_ON subscription item later).
     // Code kept from the old staff attendance so plans that had it keep it.
     code: 'teachers.staff_attendance',
     name: 'Teacher attendance',
@@ -85,6 +86,7 @@ export const FEATURES = [
     dependsOn: ['teachers'],
   },
   {
+    // Not a capability, so it is listed in each plan explicitly (every plan includes it).
     code: 'teachers.mobile_app',
     name: 'Teacher mobile app',
     description: 'Teachers use the EduSphere Teacher app (iOS and Android).',
@@ -109,12 +111,6 @@ export const FEATURES = [
   },
 
   { code: 'examinations', name: 'Examinations & results', dependsOn: ['students', 'academics'] },
-  {
-    code: 'examinations.online_results',
-    name: 'Online results',
-    parent: 'examinations',
-    dependsOn: ['examinations', 'parent_portal'],
-  },
 
   { code: 'fees', name: 'Fee management', dependsOn: ['students'] },
   {
@@ -149,22 +145,10 @@ export const FEATURES = [
     kind: 'capability',
     dependsOn: ['fees'],
   },
-  {
-    code: 'fees.online_payments',
-    name: 'Online fee payments',
-    parent: 'fees',
-    dependsOn: ['fees'],
-  },
 
   { code: 'timetable', name: 'Timetable', dependsOn: ['academics', 'teachers'] },
 
   { code: 'communication', name: 'Communication & notices' },
-  {
-    code: 'communication.sms',
-    name: 'SMS delivery',
-    parent: 'communication',
-    dependsOn: ['communication'],
-  },
 
   {
     code: 'custom_roles',
@@ -173,10 +157,7 @@ export const FEATURES = [
       'Create, edit and archive the school’s own roles. Built-in roles and inviting users are always available.',
   },
   { code: 'parent_portal', name: 'Parent / guardian portal', dependsOn: ['students'] },
-  { code: 'library', name: 'Library', dependsOn: ['students'] },
-  { code: 'transport', name: 'Transportation', dependsOn: ['students'] },
   { code: 'reports', name: 'Reports & analytics' },
-  { code: 'integrations', name: 'Integrations & external systems' },
 ] as const satisfies readonly FeatureDef[];
 
 export type FeatureCode = (typeof FEATURES)[number]['code'];

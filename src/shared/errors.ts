@@ -15,6 +15,9 @@ export type ErrorCode =
   | 'PIN_LOCKED'
   | 'NOT_A_TEACHER'
   | 'NOT_A_PARENT'
+  | 'ADMIN_PANEL_NOT_ALLOWED'
+  | 'TEACHER_APP_DISABLED'
+  | 'PARENT_APP_DISABLED'
   | 'ACCOUNT_DISABLED'
   | 'CONTEXT_SELECTION_REQUIRED'
   | 'PERMISSION_DENIED'
@@ -86,6 +89,9 @@ export class AuthorizationError extends AppError {
       | 'PIN_LOCKED'
       | 'NOT_A_TEACHER'
       | 'NOT_A_PARENT'
+      | 'ADMIN_PANEL_NOT_ALLOWED'
+      | 'TEACHER_APP_DISABLED'
+      | 'PARENT_APP_DISABLED'
     > = 'PERMISSION_DENIED',
     message = 'You do not have permission to perform this operation',
     details: unknown = null,

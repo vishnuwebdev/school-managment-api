@@ -273,8 +273,10 @@ describe('complaints, feedback and suggestions', () => {
     expect(all.body.data.map((x: Json) => x.id)).toEqual([complaintId]);
     expect(all.body.data[0].guardian.phone).toBeTruthy();
     const sum = ok(await api.get('/feedback/summary'));
-    expect(sum).toMatchObject({ open: 2, unread: 2 });
+    expect(sum).toMatchObject({ open: 2, unread: 2, awaiting_reply: 2, resolved_this_month: 0 });
+    expect(all.body.data[0].awaiting_reply).toBe(true);
     expect(sum.by_kind.COMPLAINT.open).toBe(1);
+    expect(sum.by_status).toMatchObject({ OPEN: 2, IN_PROGRESS: 0, RESOLVED: 0, CLOSED: 0 });
   });
 
   it('the school replies and resolves; the parent sees it, replies and closes', async () => {
@@ -285,6 +287,9 @@ describe('complaints, feedback and suggestions', () => {
       201,
     );
     expect(replied.status).toBe('IN_PROGRESS');
+    expect(replied.awaiting_reply).toBe(false);
+    const waiting = await api.get('/feedback?awaiting_reply=true');
+    expect(waiting.body.data.map((x: Json) => x.id)).toEqual([feedbackId]);
     const me = ok(await api.get('/auth/me'));
     const userId = me.user?.id ?? me.id;
     const assigned = ok(await api.patch(`/feedback/${complaintId}`, { assigned_to: userId }));
@@ -308,9 +313,11 @@ describe('complaints, feedback and suggestions', () => {
     expect(again.replies).toHaveLength(2);
     const inbox = await api.get('/feedback?unread=true');
     expect(inbox.body.data.map((x: Json) => x.id)).toContain(complaintId);
+    expect(ok(await api.get(`/feedback/${complaintId}`)).awaiting_reply).toBe(true);
 
     const closed = ok(await parent.post(`/parent/messages/${complaintId}/close`));
     expect(closed.status).toBe('CLOSED');
+    expect(ok(await api.get('/feedback/summary')).resolved_this_month).toBe(1);
     expect(
       code(await parent.post(`/parent/messages/${complaintId}/replies`, { body: 'One more' })),
     ).toBe('INVALID_STATE');

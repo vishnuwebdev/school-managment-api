@@ -20,11 +20,12 @@ export const users = mysqlTable(
   'users',
   {
     id: id(),
-    email: varchar('email', { length: 254 }).notNull(),
+    /** Optional: a login has an email, a mobile number (loginPhone), or both (0047). */
+    email: varchar('email', { length: 254 }),
     phone: varchar('phone', { length: 32 }),
     /**
      * Mobile number the person signs in with (0045), digits only with country code, e.g.
-     * 919876543210. Set for parent logins; unique so a number names one account.
+     * 919876543210. Any login may have one (staff, admins, parents); unique so a number names one account.
      */
     loginPhone: varchar('login_phone', { length: 20 }),
     passwordHash: varchar('password_hash', { length: 255 }),

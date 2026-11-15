@@ -91,6 +91,8 @@ export const ParentMessageListQuery = PaginationQuery.extend({
   /** Only ones with something new from the parent. */
   unread: z.stringbool().optional(),
   assigned_to_me: z.stringbool().optional(),
+  /** Only open ones where the parent had the last word (the school owes a reply). */
+  awaiting_reply: z.stringbool().optional(),
 });
 
 export const UpdateParentMessageBody = z.object({

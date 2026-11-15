@@ -18,6 +18,7 @@ import {
   students,
   subjectOfferings,
   subjects,
+  teachers,
 } from '../../db/schema/index.js';
 import type { Actor } from '../../platform/context.js';
 import { recordChange } from '../../platform/record.js';
@@ -37,6 +38,7 @@ import type {
   UpdateExamBody,
   UpdatePaperBody,
 } from './exams.schemas.js';
+import { teacherName } from './timetable.service.js';
 
 type Exam = typeof exams.$inferSelect;
 
@@ -58,6 +60,24 @@ const num = (v: string | number | null | undefined) =>
   v === null || v === undefined ? null : Number(v);
 const round = (n: number, d = 1) => Math.round(n * 10 ** d) / 10 ** d;
 const fullName = (s: { firstName: string; lastName: string }) => `${s.firstName} ${s.lastName}`;
+
+/**
+ * A short label for the classes that sit an exam, for exam cards: "Class 8",
+ * "Class 1–10" (a run of classes in the school's order), "Class 1, 3, 5", or
+ * "12 classes" when the classes are scattered. [names] are in school order;
+ * [contiguous] says whether they form an unbroken run in that order.
+ */
+export function classRangeLabel(names: string[], contiguous: boolean): string | null {
+  if (!names.length) return null;
+  if (names.length === 1) return names[0]!;
+  const prefixOf = (n: string) => n.match(/^(.*\s)\S+$/)?.[1] ?? '';
+  const prefix = prefixOf(names[0]!);
+  const shared = prefix !== '' && names.every((n) => prefixOf(n) === prefix);
+  const short = (n: string) => (shared ? n.slice(prefix.length) : n);
+  if (contiguous) return `${names[0]}–${short(names[names.length - 1]!)}`;
+  if (names.length <= 3) return [names[0]!, ...names.slice(1).map(short)].join(', ');
+  return `${names.length} classes`;
+}
 
 export class ExamService {
   constructor(private readonly deps: Deps) {}
@@ -134,6 +154,7 @@ export class ExamService {
         studentNumber: students.studentNumber,
         sectionId: academicSections.id,
         sectionName: academicSections.name,
+        rollNumber: enrollments.rollNumber,
       })
       .from(enrollments)
       .innerJoin(
@@ -246,10 +267,17 @@ export class ExamService {
   private async stats(tenantId: string, list: Exam[]) {
     const out = new Map<
       string,
-      { classes: number; papers: number; expected: number; entered: number; scheduled: number }
+      {
+        classes: number;
+        classIds: string[];
+        papers: number;
+        expected: number;
+        entered: number;
+        scheduled: number;
+      }
     >();
     for (const e of list)
-      out.set(e.id, { classes: 0, papers: 0, expected: 0, entered: 0, scheduled: 0 });
+      out.set(e.id, { classes: 0, classIds: [], papers: 0, expected: 0, entered: 0, scheduled: 0 });
     if (!list.length) return out;
     const ids = list.map((e) => e.id);
     const papers = await this.db
@@ -319,7 +347,83 @@ export class ExamService {
       s.entered += enteredBy.get(p.id) ?? 0;
     }
     const sitting = await this.examClassIds(tenantId, ids);
-    for (const [id, set] of sitting) out.get(id)!.classes = set.size;
+    for (const [id, set] of sitting) {
+      out.get(id)!.classes = set.size;
+      out.get(id)!.classIds = [...set];
+    }
+    return out;
+  }
+
+  /**
+   * Card labels per exam: the class names in school order, a short class label
+   * ("Class 1–10"; "Class 8A" for a teacher's one-section test) and the
+   * teacher's name for a teacher's own test.
+   */
+  private async labels(tenantId: string, list: Exam[], stats: Map<string, { classIds: string[] }>) {
+    const out = new Map<
+      string,
+      { class_names: string[]; class_label: string | null; teacher_name: string | null }
+    >();
+    if (!list.length) return out;
+    const sectionIds = [...new Set(list.map((e) => e.sectionId).filter((x): x is string => !!x))];
+    const teacherIds = [...new Set(list.map((e) => e.teacherId).filter((x): x is string => !!x))];
+    const [classRows, sectionRows, teacherRows] = await Promise.all([
+      this.db
+        .select({
+          id: academicClasses.id,
+          name: academicClasses.name,
+          displayName: academicClasses.displayName,
+          sequence: academicClasses.sequence,
+          status: academicClasses.status,
+        })
+        .from(academicClasses)
+        .where(eq(academicClasses.tenantId, tenantId))
+        .orderBy(asc(academicClasses.sequence), asc(academicClasses.name)),
+      sectionIds.length
+        ? this.db
+            .select({ id: academicSections.id, name: academicSections.name })
+            .from(academicSections)
+            .where(
+              and(
+                eq(academicSections.tenantId, tenantId),
+                inArray(academicSections.id, sectionIds),
+              ),
+            )
+        : [],
+      teacherIds.length
+        ? this.db
+            .select({
+              id: teachers.id,
+              firstName: teachers.firstName,
+              lastName: teachers.lastName,
+              preferredName: teachers.preferredName,
+            })
+            .from(teachers)
+            .where(and(eq(teachers.tenantId, tenantId), inArray(teachers.id, teacherIds)))
+        : [],
+    ]);
+    const sectionName = new Map(sectionRows.map((r) => [r.id, r.name]));
+    const teacherOf = new Map(teacherRows.map((r) => [r.id, teacherName(r)]));
+    for (const e of list) {
+      const ids = new Set(stats.get(e.id)?.classIds ?? []);
+      // The school's class order, leaving out archived classes the exam doesn't use.
+      const order = classRows.filter((c) => ids.has(c.id) || c.status === 'ACTIVE');
+      const positions = order.flatMap((c, i) => (ids.has(c.id) ? [i] : []));
+      const names = positions.map((i) => order[i]!.displayName || order[i]!.name);
+      const contiguous =
+        positions.length > 1 &&
+        positions[positions.length - 1]! - positions[0]! === positions.length - 1;
+      let label = classRangeLabel(names, contiguous);
+      const section = e.sectionId ? sectionName.get(e.sectionId) : undefined;
+      // "Class 8A" for a short section name, "Class 8 · Rose" otherwise.
+      if (label && section && names.length === 1)
+        label = section.length <= 2 ? `${label}${section}` : `${label} · ${section}`;
+      out.set(e.id, {
+        class_names: names,
+        class_label: label,
+        teacher_name: e.teacherId ? (teacherOf.get(e.teacherId) ?? null) : null,
+      });
+    }
     return out;
   }
 
@@ -388,7 +492,11 @@ export class ExamService {
       this.stats(tenantId, rows),
       this.yearNames(tenantId),
     ]);
-    return rows.map((e) => this.present(e, years.get(e.academicYearId), stats.get(e.id)!));
+    const labels = await this.labels(tenantId, rows, stats);
+    return rows.map((e) => ({
+      ...this.present(e, years.get(e.academicYearId), stats.get(e.id)!),
+      ...labels.get(e.id)!,
+    }));
   }
 
   /** One exam with a progress line per class. */
@@ -455,8 +563,10 @@ export class ExamService {
         };
       })
       .sort((a, b) => a.sequence - b.sequence);
+    const labels = await this.labels(tenantId, [exam], stats);
     return {
       ...this.present(exam, years.get(exam.academicYearId), stats.get(id)!),
+      ...labels.get(id)!,
       class_progress: byClass,
     };
   }
@@ -913,6 +1023,7 @@ export class ExamService {
           admission_number: s.admissionNumber ?? s.studentNumber,
           section_id: s.sectionId,
           section_name: s.sectionName,
+          roll_number: s.rollNumber,
           marks: num(m?.marks),
           absent: m?.absent ?? false,
           remark: m?.remark ?? null,
@@ -1115,7 +1226,9 @@ export class ExamService {
         student_id: s.studentId,
         name: fullName(s),
         admission_number: s.admissionNumber ?? s.studentNumber,
+        section_id: s.sectionId,
         section_name: s.sectionName,
+        roll_number: s.rollNumber,
         subjects: subjectMarks,
         total: round(total, 2),
         max_total: maxTotal,

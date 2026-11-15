@@ -1,4 +1,4 @@
-import { and, count, desc, eq, inArray, sql, type SQL } from 'drizzle-orm';
+import { and, count, desc, eq, gte, inArray, sql, type SQL } from 'drizzle-orm';
 import { uuidv7 } from 'uuidv7';
 import type { z } from 'zod';
 import type { Deps } from '../../container.js';
@@ -36,6 +36,9 @@ type GuardianRow = typeof guardians.$inferSelect;
 type StudentRow = typeof students.$inferSelect;
 type RequestRow = typeof studentChangeRequests.$inferSelect;
 type MessageRow = typeof parentMessages.$inferSelect;
+
+/** Still open and the last word is the parent's (no school reply yet, or the parent wrote since). */
+const awaitingReplySql = sql`(${parentMessages.status} in ('OPEN', 'IN_PROGRESS') and coalesce((select ${parentMessageReplies.author} from ${parentMessageReplies} where ${parentMessageReplies.messageId} = ${parentMessages.id} order by ${parentMessageReplies.createdAt} desc, ${parentMessageReplies.id} desc limit 1), 'PARENT') = 'PARENT')`;
 
 const nameOf = (p: { firstName: string; middleName?: string | null; lastName: string }) =>
   [p.firstName, p.middleName, p.lastName].filter(Boolean).join(' ');
@@ -86,7 +89,7 @@ const same = (a: unknown, b: unknown) =>
 /** The parent's own details, as the parent app shows them. */
 export function presentParentProfile(
   g: GuardianRow,
-  login: { email: string; loginPhone: string | null } | null,
+  login: { email: string | null; loginPhone: string | null } | null,
 ) {
   return {
     guardian_id: g.id,
@@ -98,7 +101,7 @@ export function presentParentProfile(
     phone: g.phone,
     sign_in: {
       mobile: login?.loginPhone ? `+${login.loginPhone}` : null,
-      email: login && !login.email.endsWith('@parents.invalid') ? login.email : null,
+      email: login?.email ?? null,
     },
     address: g.address ?? null,
     occupation: g.occupation,
@@ -476,12 +479,23 @@ export class ParentRequestService {
     const gIds = [...new Set(rows.map((r) => r.guardianId))];
     const sIds = [...new Set(rows.map((r) => r.studentId).filter((x): x is string => !!x))];
     const uIds = [...new Set(rows.map((r) => r.assignedTo).filter((x): x is string => !!x))];
-    const [gs, ss, us] = await Promise.all([
+    const mIds = rows.map((r) => r.id);
+    const [gs, ss, us, rs] = await Promise.all([
       gIds.length ? this.db.select().from(guardians).where(inArray(guardians.id, gIds)) : [],
       sIds.length ? this.db.select().from(students).where(inArray(students.id, sIds)) : [],
       uIds.length ? this.db.select().from(users).where(inArray(users.id, uIds)) : [],
+      mIds.length
+        ? this.db
+            .select({ id: parentMessageReplies.messageId, author: parentMessageReplies.author })
+            .from(parentMessageReplies)
+            .where(inArray(parentMessageReplies.messageId, mIds))
+            .orderBy(parentMessageReplies.createdAt, parentMessageReplies.id)
+        : [],
     ]);
+    const lastAuthor = new Map<string, string>();
+    for (const r of rs) lastAuthor.set(r.id, r.author);
     return {
+      lastAuthor,
       guardian: new Map(gs.map((g) => [g.id, g])),
       student: new Map(ss.map((s) => [s.id, s])),
       user: new Map(us.map((u) => [u.id, `${u.firstName} ${u.lastName}`.trim()])),
@@ -513,6 +527,10 @@ export class ParentRequestService {
           ? { user_id: r.assignedTo, name: n.user.get(r.assignedTo) ?? null }
           : null,
       unread: side === 'school' ? r.unreadBySchool : r.unreadByParent,
+      /** Open, and the parent had the last word: the school owes a reply. */
+      awaiting_reply:
+        (r.status === 'OPEN' || r.status === 'IN_PROGRESS') &&
+        (n.lastAuthor.get(r.id) ?? 'PARENT') === 'PARENT',
       last_activity_at: r.lastActivityAt.toISOString(),
       resolved_at: r.resolvedAt?.toISOString() ?? null,
       created_at: r.createdAt.toISOString(),
@@ -739,6 +757,7 @@ export class ParentRequestService {
       q.topic ? eq(parentMessages.topic, q.topic) : undefined,
       q.unread ? eq(parentMessages.unreadBySchool, true) : undefined,
       q.assigned_to_me ? eq(parentMessages.assignedTo, principal.userId) : undefined,
+      q.awaiting_reply === true ? awaitingReplySql : undefined,
       q.search
         ? sql`(${parentMessages.subject} like ${`%${q.search}%`} or ${parentMessages.referenceNumber} like ${`%${q.search}%`})`
         : undefined,
@@ -772,11 +791,35 @@ export class ParentRequestService {
       .from(parentMessages)
       .where(and(eq(parentMessages.tenantId, tenantId), this.visibleKinds(principal)))
       .groupBy(parentMessages.kind, parentMessages.status, parentMessages.unreadBySchool);
+    const now = this.deps.clock.now();
+    const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+    const visible = and(eq(parentMessages.tenantId, tenantId), this.visibleKinds(principal));
+    const [[awaiting], [resolved]] = await Promise.all([
+      this.db.select({ n: count() }).from(parentMessages).where(and(visible, awaitingReplySql)),
+      this.db
+        .select({ n: count() })
+        .from(parentMessages)
+        .where(
+          and(
+            visible,
+            inArray(parentMessages.status, ['RESOLVED', 'CLOSED']),
+            gte(parentMessages.resolvedAt, monthStart),
+          ),
+        ),
+    ]);
     const sum = (f: (r: (typeof rows)[number]) => boolean) =>
       rows.filter(f).reduce((t, r) => t + Number(r.n), 0);
     return {
+      awaiting_reply: Number(awaiting?.n ?? 0),
+      resolved_this_month: Number(resolved?.n ?? 0),
       unread: sum((r) => r.unread),
       open: sum((r) => r.status === 'OPEN' || r.status === 'IN_PROGRESS'),
+      by_status: Object.fromEntries(
+        (['OPEN', 'IN_PROGRESS', 'RESOLVED', 'CLOSED'] as const).map((st) => [
+          st,
+          sum((r) => r.status === st),
+        ]),
+      ),
       by_kind: Object.fromEntries(
         (['COMPLAINT', 'FEEDBACK', 'SUGGESTION'] as const).map((k) => [
           k,

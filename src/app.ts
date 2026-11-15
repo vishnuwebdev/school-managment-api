@@ -66,6 +66,7 @@ import { parentRequestRoutes } from "./modules/parent-app/parent-requests.routes
 import { rollNumberRoutes } from "./modules/students/roll-numbers.js";
 import { dashboardRoutes } from "./modules/dashboard/dashboard.routes.js";
 import type { Services } from "./services.js";
+import { isSimpleMode, SIMPLE_MODE_HIDDEN_PATHS } from "./catalog/product-mode.js";
 
 export interface AppOptions {
   /** Extra routes (used by tests to exercise the pipeline). */
@@ -143,9 +144,8 @@ export function createApp(
 
   const pipeline = createPipeline(deps, svc);
   const api = Router();
-  mountRoutes(
-    api,
-    [
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const routes: RouteDef<any, any, any>[] = [
       ...authRoutes(svc.auth),
       ...publicTenantRoutes(svc.tenants),
       ...currentTenantRoutes(svc.tenants),
@@ -194,7 +194,7 @@ export function createApp(
         svc.timetablePeriods,
         svc.timetableViews,
       ),
-      ...examRoutes(svc.exams, svc.examTimetable),
+      ...examRoutes(svc.exams, svc.examTimetable, svc.reportCards),
       ...teacherAppRoutes({
         app: svc.teacherApp,
         pins: svc.pins,
@@ -250,9 +250,12 @@ export function createApp(
       ...platformTenantRoutes(svc.tenants, svc.entitlements),
       ...platformUserRoutes(svc.members),
       ...(opts.extraRoutes ?? []),
-    ],
-    pipeline,
-  );
+  ];
+  // Simple mode: sub-users, roles, plans, subscriptions and billing are switched off (code kept).
+  const served = isSimpleMode(deps.env)
+    ? routes.filter((r) => !SIMPLE_MODE_HIDDEN_PATHS.some((re) => re.test(r.path)))
+    : routes;
+  mountRoutes(api, served, pipeline);
   app.use("/api/v1", api);
 
   const docsEnabled =

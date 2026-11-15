@@ -112,7 +112,7 @@ async function main() {
     if (problems.length || lost.length)
       findings.push({
         school: r.school,
-        user: r.email,
+        user: r.email ?? '(mobile login)',
         role: r.roleName,
         scope_type: r.scopeType,
         problems,

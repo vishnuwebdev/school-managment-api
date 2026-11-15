@@ -1,14 +1,6 @@
 import { PDFDocument, rgb, StandardFonts } from 'pdf-lib';
+import { paymentMethodLabel } from '../../shared/payment-methods.js';
 import { drawCentered, safe, wrap } from '../students/certificates.pdf.js';
-
-export const METHOD_LABEL: Record<string, string> = {
-  CASH: 'Cash',
-  BANK_TRANSFER: 'Bank transfer (EFT)',
-  CHEQUE: 'Cheque',
-  CARD: 'Card',
-  MOBILE_MONEY: 'Mobile money',
-  OTHER: 'Other',
-};
 
 /** 1234500 minor units → "12,345.00". */
 export function formatMinor(minor: number): string {
@@ -182,7 +174,7 @@ export async function renderInvoice(o: InvoicePdfInput): Promise<Buffer> {
     y -= 14;
   }
   for (const p of o.payments.slice(0, 14)) {
-    const label = `${p.receipt_number}   ${day(p.received_at)}   ${METHOD_LABEL[p.method] ?? p.method}${p.reference ? `   Ref ${p.reference}` : ''}${p.reversed ? '   (reversed)' : ''}`;
+    const label = `${p.receipt_number}   ${day(p.received_at)}   ${paymentMethodLabel(p.method)}${p.reference ? `   Ref ${p.reference}` : ''}${p.reversed ? '   (reversed)' : ''}`;
     page.drawText(safe(regular, label).slice(0, 95), {
       x: left,
       y,
@@ -265,7 +257,7 @@ export async function renderPaymentReceipt(o: ReceiptPdfInput): Promise<Buffer> 
   row('Receipt no.', o.receipt_number);
   row('Date received', day(o.received_at));
   row('Received from', o.received_from);
-  row('Method', METHOD_LABEL[o.method] ?? o.method);
+  row('Method', paymentMethodLabel(o.method));
   if (o.reference) row('Reference', o.reference);
   row('For invoice', o.invoice_number);
   y -= 6;

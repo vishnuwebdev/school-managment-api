@@ -1118,6 +1118,9 @@ export class LearnerFeesService {
     const out = sql`(${d.finalAmount} - ${d.paidAmount} - ${d.writtenOffAmount})`;
     const pastDue = sql`${owed} and ${d.dueDate} < ${today} and ${out} > 0`;
     const isGrade = sql`${studentFeeAssignments.structureCode} like ${GRADE_LIKE}`;
+    const [ty, tm] = today.split("-").map(Number) as [number, number];
+    const monthEnd = new Date(Date.UTC(ty, tm, 0)).toISOString().slice(0, 10);
+    const comingUp = sql`${owed} and ${d.dueDate} >= ${today} and ${out} > 0`;
     const money = ids.length
       ? await this.db
           .select({
@@ -1125,6 +1128,12 @@ export class LearnerFeesService {
             paid: sql<string>`coalesce(sum(${d.paidAmount}), 0)`,
             dueToDate: sql<string>`coalesce(sum(case when ${d.dueDate} <= ${today} then ${d.finalAmount} else 0 end), 0)`,
             owing: sql<string>`coalesce(sum(case when ${pastDue} then ${out} else 0 end), 0)`,
+            billed: sql<string>`coalesce(sum(${d.finalAmount}), 0)`,
+            balance: sql<string>`coalesce(sum(case when ${owed} then ${out} else 0 end), 0)`,
+            nextDue: sql<
+              string | null
+            >`min(case when ${comingUp} then cast(${d.dueDate} as char) end)`,
+            dueThisMonth: sql<string>`coalesce(sum(case when ${comingUp} and ${d.dueDate} <= ${monthEnd} then ${out} else 0 end), 0)`,
             untouchedOverdue: sql<number>`coalesce(sum(case when ${pastDue} and ${d.paidAmount} = 0 then 1 else 0 end), 0)`,
             instalments: sql<number>`coalesce(sum(case when ${isGrade} then 1 else 0 end), 0)`,
             instalment: sql<
@@ -1173,6 +1182,9 @@ export class LearnerFeesService {
       const paid = toMinor(String(m?.paid ?? "0"));
       const due = toMinor(String(m?.dueToDate ?? "0"));
       const owing = toMinor(String(m?.owing ?? "0"));
+      const billed = toMinor(String(m?.billed ?? "0"));
+      const balance = toMinor(String(m?.balance ?? "0"));
+      const dueMonth = toMinor(String(m?.dueThisMonth ?? "0"));
       const status =
         owing <= 0n
           ? "UP_TO_DATE"
@@ -1197,10 +1209,17 @@ export class LearnerFeesService {
         paid: fromMinor(paid),
         due_to_date: fromMinor(due),
         owing: fromMinor(owing),
+        // The whole year: everything billed, and what is still to pay of it.
+        total: fromMinor(billed),
+        balance: fromMinor(balance),
+        next_due_date: m?.nextDue ? String(m.nextDue).slice(0, 10) : null,
+        due_this_month: fromMinor(dueMonth),
+        paid_in_full: billed > 0n && balance <= 0n,
         status,
         _paid: paid,
         _due: due,
         _owing: owing,
+        _dueMonth: dueMonth,
       };
     });
     const total = (rs: typeof rows, f: (r: (typeof rows)[number]) => bigint) =>
@@ -1244,15 +1263,28 @@ export class LearnerFeesService {
           r.student_number.toLowerCase().includes(needle) ||
           (r.admission_number ?? "").toLowerCase().includes(needle)),
     );
+    type Row = (typeof rows)[number];
+    const groupOf: Record<string, (r: Row) => boolean> = {
+      BEHIND: (r) => r._owing > 0n,
+      PAID_IN_FULL: (r) => r.paid_in_full,
+      NO_PLAN: (r) => r.plan === null,
+      DUE_THIS_MONTH: (r) => r._dueMonth > 0n,
+    };
+    const matches = (r: Row, f: string) =>
+      groupOf[f] ? groupOf[f](r) : r.status === f;
     const counts = {
       ALL: filtered.length,
       OVERDUE: filtered.filter((r) => r.status === "OVERDUE").length,
       PART_PAID: filtered.filter((r) => r.status === "PART_PAID").length,
       UP_TO_DATE: filtered.filter((r) => r.status === "UP_TO_DATE").length,
+      BEHIND: filtered.filter(groupOf.BEHIND!).length,
+      PAID_IN_FULL: filtered.filter(groupOf.PAID_IN_FULL!).length,
+      NO_PLAN: filtered.filter(groupOf.NO_PLAN!).length,
+      DUE_THIS_MONTH: filtered.filter(groupOf.DUE_THIS_MONTH!).length,
     };
     const rank = { OVERDUE: 0, PART_PAID: 1, UP_TO_DATE: 2 } as const;
     const list = filtered
-      .filter((r) => !q.status || r.status === q.status)
+      .filter((r) => !q.status || matches(r, q.status))
       .sort(
         (a, b) =>
           rank[a.status as keyof typeof rank] -
@@ -1276,13 +1308,18 @@ export class LearnerFeesService {
         ),
         outstanding: fromMinor(total(scope, (r) => r._owing)),
         learners_behind: scope.filter((r) => r._owing > 0n).length,
+        due_this_month: fromMinor(total(scope, (r) => r._dueMonth)),
+        learners_due_this_month: scope.filter((r) => r._dueMonth > 0n).length,
+        month_end: monthEnd,
+        paid_in_full: scope.filter((r) => r.paid_in_full).length,
+        no_plan: scope.filter((r) => r.plan === null).length,
       },
       plan_mix: planMix,
       by_class: byClass,
       counts,
       learners: list
         .slice(start, start + q.page_size)
-        .map(({ _paid, _due, _owing, class_seq: _s, ...r }) => r),
+        .map(({ _paid, _due, _owing, _dueMonth, class_seq: _s, ...r }) => r),
       meta: { page: q.page, page_size: q.page_size, total: list.length },
     };
   }

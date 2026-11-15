@@ -15,7 +15,19 @@ export type SessionEndCode =
   'SESSION_EXPIRED' | 'SIGNED_OUT_ELSEWHERE' | 'SESSION_REVOKED' | 'INVALID_TOKEN';
 
 const ELSEWHERE = new Set(['USER_REVOKED', 'PASSWORD_CHANGED', 'PASSWORD_RESET', 'REFRESH_REUSE']);
-const REVOKED = new Set(['ACCESS_REVOKED', 'MEMBERSHIP_SUSPENDED', 'MEMBERSHIP_REVOKED']);
+const REVOKED = new Set([
+  'ACCESS_REVOKED',
+  'MEMBERSHIP_SUSPENDED',
+  'MEMBERSHIP_REVOKED',
+  'SCHOOL_DISABLED',
+  'APP_DISABLED',
+]);
+
+/** A clearer message for some revoke reasons (same SESSION_REVOKED code). */
+const REASON_MESSAGES: Record<string, string> = {
+  SCHOOL_DISABLED: 'This school is disabled. Contact the platform team.',
+  APP_DISABLED: 'This app was switched off for your school. Contact the school office.',
+};
 
 export function sessionEndCode(revokedReason: string | null, expired: boolean): SessionEndCode {
   if (revokedReason === null) return expired ? 'SESSION_EXPIRED' : 'INVALID_TOKEN';
@@ -34,5 +46,7 @@ const MESSAGES: Record<SessionEndCode, string> = {
 
 export function sessionEnded(revokedReason: string | null, expired: boolean): AuthenticationError {
   const code = sessionEndCode(revokedReason, expired);
-  return new AuthenticationError(code, MESSAGES[code]);
+  const special =
+    code === 'SESSION_REVOKED' && revokedReason ? REASON_MESSAGES[revokedReason] : null;
+  return new AuthenticationError(code, special ?? MESSAGES[code]);
 }

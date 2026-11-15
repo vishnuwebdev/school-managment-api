@@ -25,7 +25,9 @@ describe('Milestone 1 — platform admin → school → admin invitation → log
     expect(me.body.data.entitlements.features).toEqual(
       expect.arrayContaining(['core', 'students', 'fees', 'examinations']),
     );
-    expect(me.body.data.entitlements.features).not.toContain('transport');
+    // The teacher app is in every plan; subject/period attendance is Premium only.
+    expect(me.body.data.entitlements.features).toContain('teachers.mobile_app');
+    expect(me.body.data.entitlements.features).not.toContain('attendance.subject');
 
     const school = await admin.api.get('/tenants/current');
     expect(school.status).toBe(200);
@@ -129,10 +131,9 @@ describe('Milestone 1 — platform admin → school → admin invitation → log
     expect(admins.body.data[0]).toMatchObject({ email, first_name: 'Asha', status: 'ACTIVE' });
 
     const membershipId = admins.body.data[0].membership_id;
-    const reset = await root.put(
-      `/platform/tenants/${tenantId}/admins/${membershipId}/password`,
-      { password: 'Changed456' },
-    );
+    const reset = await root.put(`/platform/tenants/${tenantId}/admins/${membershipId}/password`, {
+      password: 'Changed456',
+    });
     expect(reset.status, JSON.stringify(reset.body)).toBe(200);
     await h.login(email, 'Changed456');
 

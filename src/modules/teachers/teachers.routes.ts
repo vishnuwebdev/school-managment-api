@@ -83,12 +83,22 @@ export function teacherRoutes(
       method: 'get',
       path: '/teachers',
       summary:
-        'List and search teachers (filters: status, department, employment_type, has_login)',
+        'List and search teachers (filters: status, status_group, department, employment_type, has_login, has_assignments)',
       tags: TAG,
       access: 'tenant',
       permissions: ['teachers.read'],
       query: TeacherListQuery,
       handler: async ({ query, req }) => teachers.list(tid(req), query, me(req)),
+    }),
+    defineRoute({
+      method: 'get',
+      path: '/teachers/summary',
+      summary:
+        'Counts for the teacher list: per status and status group, current teachers (not left) without a login or a teaching assignment',
+      tags: TAG,
+      access: 'tenant',
+      permissions: ['teachers.read'],
+      handler: async ({ req }) => ({ data: await teachers.summary(tid(req), me(req)) }),
     }),
     defineRoute({
       method: 'get',

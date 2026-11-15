@@ -16,23 +16,36 @@ const INK = rgb(0.1, 0.12, 0.18);
 const MUTED = rgb(0.4, 0.44, 0.5);
 const LINE = rgb(0.82, 0.84, 0.88);
 
-interface Ctx {
+interface Doc {
   pdf: PDFDocument;
-  page: PDFPage;
   regular: PDFFont;
   bold: PDFFont;
   brand: ReturnType<typeof colorOf>;
+  logo: Awaited<ReturnType<typeof embed>>;
+}
+
+interface Ctx extends Doc {
+  page: PDFPage;
   y: number;
 }
 
-async function start(b: PdfBranding, title: string): Promise<Ctx> {
+/** One PDF with fonts and the logo embedded once, so many pages stay small. */
+async function openDoc(b: PdfBranding): Promise<Doc> {
   const pdf = await PDFDocument.create();
-  const page = pdf.addPage([W, H]);
-  const regular = await pdf.embedFont(StandardFonts.Helvetica);
-  const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
-  const brand = colorOf(b.primary_color);
+  return {
+    pdf,
+    regular: await pdf.embedFont(StandardFonts.Helvetica),
+    bold: await pdf.embedFont(StandardFonts.HelveticaBold),
+    brand: colorOf(b.primary_color),
+    logo: await embed(pdf, b.logo),
+  };
+}
+
+/** A new A4 page with the school letterhead and the document title. */
+function newPage(d: Doc, b: PdfBranding, title: string): Ctx {
+  const page = d.pdf.addPage([W, H]);
+  const { regular, bold, brand, logo } = d;
   let y = H - 40;
-  const logo = await embed(pdf, b.logo);
   if (logo) {
     const h = 44;
     const w = (logo.width / logo.height) * h;
@@ -54,7 +67,11 @@ async function start(b: PdfBranding, title: string): Promise<Ctx> {
   y -= 30;
   drawCentered(page, bold, title, y, 16, INK);
   y -= 30;
-  return { pdf, page, regular, bold, brand, y };
+  return { ...d, page, y };
+}
+
+async function start(b: PdfBranding, title: string): Promise<Ctx> {
+  return newPage(await openDoc(b), b, title);
 }
 
 function facts(c: Ctx, rows: [string, string][]) {
@@ -151,7 +168,6 @@ const fmt = (n: number | null) =>
   n === null ? '-' : Number.isInteger(n) ? String(n) : n.toFixed(2);
 
 export interface ReportCardInput {
-  branding: PdfBranding;
   exam_name: string;
   academic_year: string | null;
   published_on: string | null;
@@ -179,9 +195,26 @@ export interface ReportCardInput {
   generated_on: string;
 }
 
-/** A4 report card: student, subject marks with grades, totals, rank and the teacher's remark. */
-export async function renderReportCard(o: ReportCardInput): Promise<Buffer> {
-  const c = await start(o.branding, 'REPORT CARD');
+/**
+ * A4 report cards, one page per student: subject marks with grades, totals, rank and the
+ * teacher's remark. One student for the parent app, a whole section for the school office.
+ */
+export async function renderReportCards(
+  branding: PdfBranding,
+  cards: ReportCardInput[],
+): Promise<Buffer> {
+  const d = await openDoc(branding);
+  for (const o of cards) drawReportCard(newPage(d, branding, 'REPORT CARD'), branding, o);
+  return Buffer.from(await d.pdf.save());
+}
+
+/** "80%" or "66.7%" (one decimal only when needed). */
+const pct = (v: number) => {
+  const r = Math.round(v * 10) / 10;
+  return `${Number.isInteger(r) ? r.toFixed(0) : r.toFixed(1)}%`;
+};
+
+function drawReportCard(c: Ctx, branding: PdfBranding, o: ReportCardInput) {
   drawCentered(
     c.page,
     c.regular,
@@ -200,17 +233,19 @@ export async function renderReportCard(o: ReportCardInput): Promise<Buffer> {
   table(
     c,
     [
-      { label: 'Subject', width: 200 },
-      { label: 'Marks', width: 80, align: 'right' },
-      { label: 'Out of', width: 70, align: 'right' },
-      { label: 'Grade', width: 60, align: 'right' },
-      { label: 'Result', width: 89, align: 'right' },
+      { label: 'Subject', width: 180 },
+      { label: 'Marks', width: 70, align: 'right' },
+      { label: 'Out of', width: 60, align: 'right' },
+      { label: '%', width: 60, align: 'right' },
+      { label: 'Grade', width: 50, align: 'right' },
+      { label: 'Result', width: 79, align: 'right' },
     ],
     [
       ...o.subjects.map((s) => [
         s.subject_name,
         s.absent ? 'Absent' : fmt(s.marks),
         fmt(s.max_marks),
+        s.absent || s.marks === null || s.max_marks <= 0 ? '-' : pct((s.marks / s.max_marks) * 100),
         s.grade ?? '-',
         s.passed === null ? '-' : s.passed ? 'Pass' : 'Fail',
       ]),
@@ -218,6 +253,7 @@ export async function renderReportCard(o: ReportCardInput): Promise<Buffer> {
         'Total',
         fmt(o.total),
         fmt(o.max_total),
+        pct(o.percentage),
         o.grade ?? '-',
         o.result === 'PASS' ? 'Pass' : o.result === 'FAIL' ? 'Fail' : '-',
       ],
@@ -225,7 +261,8 @@ export async function renderReportCard(o: ReportCardInput): Promise<Buffer> {
     { boldLast: true },
   );
   facts(c, [
-    ['Percentage', `${o.percentage.toFixed(1)}%`],
+    ['Percentage', pct(o.percentage)],
+    ['Overall grade', o.grade ?? '-'],
     ['Class rank', o.rank ? `${o.rank} of ${o.class_size}` : '-'],
     ['Class average', o.class_average === null ? '-' : `${o.class_average.toFixed(1)}%`],
     ['Published', o.published_on ?? '-'],
@@ -252,8 +289,7 @@ export async function renderReportCard(o: ReportCardInput): Promise<Buffer> {
         color: MUTED,
       });
   }
-  footer(c, o.branding, `Generated on ${o.generated_on}. Marks are as published by the school.`);
-  return Buffer.from(await c.pdf.save());
+  footer(c, branding, `Generated on ${o.generated_on}. Marks are as published by the school.`);
 }
 
 export interface FeeInvoiceInput {

@@ -185,17 +185,20 @@ describe('creating and editing plans', () => {
   it('a school with an override keeps it when the plan changes', async () => {
     const c = await newPlan(['students']);
     const S = await h.provisionSchool({ plan: c, customRoles: false });
-    const grant = await root.put(`/platform/tenants/${S.tenantId}/entitlements/overrides/library`, {
-      effect: 'GRANT',
-      reason: 'Pilot',
-    });
+    const grant = await root.put(
+      `/platform/tenants/${S.tenantId}/entitlements/overrides/custom_roles`,
+      {
+        effect: 'GRANT',
+        reason: 'Pilot',
+      },
+    );
     expect(grant.status, JSON.stringify(grant.body)).toBe(200);
     await root.put(`/platform/plans/${c}/features`, {
       features: ['students', 'students.certificates'],
       reason: 'Add certificates',
     });
     const now = (await entitled(S.tenantId)).features;
-    expect(now).toEqual(expect.arrayContaining(['library', 'students.certificates']));
+    expect(now).toEqual(expect.arrayContaining(['custom_roles', 'students.certificates']));
   });
 
   it('price changes do not touch a subscription that already started; retiring hides a plan from new schools', async () => {

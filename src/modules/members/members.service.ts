@@ -14,14 +14,15 @@ import {
 import { recordAudit } from '../../platform/audit.js';
 import type { Actor, Principal } from '../../platform/context.js';
 import { publishEvent } from '../../platform/outbox.js';
-import { BusinessRuleError, NotFoundError } from '../../shared/errors.js';
+import { BusinessRuleError, NotFoundError, ValidationError } from '../../shared/errors.js';
 import { offsetOf, orderFrom, pageOf, type PaginationQuery } from '../../shared/pagination.js';
 import { adminCount, assertAdminSurvives, lockAdminScope } from '../access/admin-guard.js';
 import type { AuthorizationService } from '../access/authorization.service.js';
 import { assertCanGrant, assertScopeWithin, type RoleService } from '../access/roles.service.js';
 import { deletePin } from '../identity/app-pin.js';
+import { normalizeLoginPhone, presentLoginPhone } from '../identity/login-phone.js';
 import { hashPassword } from '../identity/password.js';
-import { setPasswordByAdmin } from './credentials.js';
+import { setLoginPhoneByAdmin, setPasswordByAdmin } from './credentials.js';
 import { assignRoles, inviteMember, queueInvitation, type AssignmentInput } from './invitations.js';
 
 interface AssignmentFact {
@@ -88,7 +89,14 @@ export class MemberService {
     if (q.status) conds.push(eq(memberships.status, q.status));
     if (q.search) {
       const s = `%${q.search}%`;
-      conds.push(or(like(users.email, s), like(users.firstName, s), like(users.lastName, s)));
+      conds.push(
+        or(
+          like(users.email, s),
+          like(users.loginPhone, `%${q.search.replace(/\D/g, '') || q.search}%`),
+          like(users.firstName, s),
+          like(users.lastName, s),
+        ),
+      );
     }
     if (q.role_id) {
       conds.push(
@@ -222,6 +230,7 @@ export class MemberService {
         ? {
             id: u.id,
             email: u.email,
+            login_phone: null,
             first_name: invite?.firstName ?? null,
             last_name: invite?.lastName ?? null,
             status: 'INVITED' as const,
@@ -230,6 +239,7 @@ export class MemberService {
         : {
             id: u.id,
             email: u.email,
+            login_phone: presentLoginPhone(u.loginPhone),
             first_name: u.firstName,
             last_name: u.lastName,
             status: u.status,
@@ -300,13 +310,15 @@ export class MemberService {
   // ---------------------------------------------------------------------------
 
   /**
-   * Invite someone. With `password` (school logins only) the admin sets the
-   * password instead: the login is active at once and no email is sent.
+   * Invite someone to a school (or the platform, tenantId null). With `password` the admin sets
+   * the password instead: the login is active at once and no email is sent. A login may have a
+   * sign-in mobile number; without an email it must get a password now.
    */
   async invite(
     tenantId: string | null,
     input: {
-      email: string;
+      email?: string | null;
+      mobile?: string | null;
       firstName: string;
       lastName?: string;
       assignments: AssignmentInput[];
@@ -315,23 +327,29 @@ export class MemberService {
     principal: Principal,
     actor: Actor,
   ) {
-    const { password, ...invite } = input;
-    if (password && !tenantId)
-      throw new BusinessRuleError('OPERATION_NOT_ALLOWED', 'Platform logins are invited by email');
+    const { password, mobile, ...invite } = input;
+    if (!invite.email && !password)
+      throw new ValidationError('The request is invalid', {
+        location: 'body',
+        issues: [{ path: 'password', message: 'Add an email, or set a password now' }],
+      });
+    const loginPhone = mobile ? await normalizeLoginPhone(this.deps.db, mobile, tenantId) : null;
     const passwordHash = password ? await hashPassword(password) : null;
     const res = await this.deps.db.transaction(async (tx) => {
       await this.assertCanAssign(tx, tenantId, principal, invite.assignments);
-      const created = await inviteMember(this.deps, tx, { ...invite, tenantId }, actor);
+      const created = await inviteMember(this.deps, tx, { ...invite, loginPhone, tenantId }, actor);
       // The queued invitation is revoked in this transaction, so its email is never sent.
       if (passwordHash)
         await setPasswordByAdmin(
           this.deps,
           tx,
           {
-            tenantId: tenantId!,
+            tenantId,
             membershipId: created.membershipId,
             passwordHash,
-            reason: 'Login created with a password set by the school',
+            reason: tenantId
+              ? 'Login created with a password set by the school'
+              : 'Login created with a password set by the platform team',
           },
           actor,
         );
@@ -342,11 +360,11 @@ export class MemberService {
   }
 
   /**
-   * A school admin sets the password of a school login (e.g. for the teacher
-   * app). Only for accounts used at this school alone; see assertAccountManagedBy.
+   * An admin sets the password of a school login (e.g. for the teacher app), or of a platform
+   * login (tenantId null). Only for accounts used there alone; see assertAccountManagedBy.
    */
   async setPassword(
-    tenantId: string,
+    tenantId: string | null,
     membershipId: string,
     password: string,
     reason: string,
@@ -378,6 +396,32 @@ export class MemberService {
     return this.get(tenantId, membershipId);
   }
 
+  /**
+   * An admin changes (or, with null, removes) the mobile number a school login (or a platform
+   * login, tenantId null) signs in with.
+   */
+  async setMobile(
+    tenantId: string | null,
+    membershipId: string,
+    mobile: string | null,
+    principal: Principal,
+    actor: Actor,
+  ) {
+    const loginPhone = mobile ? await normalizeLoginPhone(this.deps.db, mobile, tenantId) : null;
+    await this.deps.db.transaction(async (tx) => {
+      const member = await this.get(tenantId, membershipId, tx);
+      if (membershipId !== principal.membershipId)
+        await this.assertCanManage(
+          tx,
+          tenantId,
+          principal,
+          member.roles.map((r) => r.role_id),
+        );
+      await setLoginPhoneByAdmin(tx, { tenantId, membershipId, loginPhone }, actor);
+    });
+    return this.get(tenantId, membershipId);
+  }
+
   async resendInvitation(
     tenantId: string | null,
     membershipId: string,
@@ -400,6 +444,11 @@ export class MemberService {
         principal,
         member.roles.map((r) => r.role_id),
       );
+      if (!member.user.email)
+        throw new BusinessRuleError(
+          'OPERATION_NOT_ALLOWED',
+          'This login has no email; set a password instead',
+        );
       await queueInvitation(
         this.deps,
         tx,

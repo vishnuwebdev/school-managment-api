@@ -37,11 +37,16 @@ import type { PaymentInput } from '../billing/billing.schemas.js';
 import type { BillingService } from '../billing/billing.service.js';
 import type { EntitlementService } from '../entitlements/entitlements.service.js';
 import { inviteMember } from '../members/invitations.js';
-import { setPasswordByAdmin } from '../members/credentials.js';
+import { setLoginPhoneByAdmin, setPasswordByAdmin } from '../members/credentials.js';
+import { normalizeLoginPhone, presentLoginPhone } from '../identity/login-phone.js';
 import { hashPassword } from '../identity/password.js';
 import { assertTransition } from './lifecycle.js';
+import { APP_FEATURES, isSimpleMode, type AppSwitch } from '../../catalog/product-mode.js';
+import { entitlements as entitlementRows, features, userSessions } from '../../db/schema/index.js';
+import { isNull } from 'drizzle-orm';
 import { presentProfileExtras, presentSettings, presentTenant } from './presenters.js';
 import type {
+  AppsBody,
   ChangeSubscriptionBody,
   CreateTenantBody,
   ProvisionBody,
@@ -50,6 +55,8 @@ import type {
 } from './schemas.js';
 
 type ProfileInput = Partial<z.infer<typeof CreateTenantBody>>;
+
+const NO_APPS: Record<AppSwitch, boolean> = { teacher_app: false, parent_app: false };
 
 const DEFAULT_WORKING_DAYS = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
 
@@ -158,7 +165,12 @@ export class TenantService {
         .offset(offsetOf(q)),
       this.deps.db.select({ n: count() }).from(tenants).where(where),
     ]);
-    return pageOf(rows.map(presentTenant), total?.n ?? 0, q);
+    const apps = await this.appsOf(rows.map((r) => r.id));
+    return pageOf(
+      rows.map((r) => ({ ...presentTenant(r), apps: apps.get(r.id) ?? NO_APPS })),
+      total?.n ?? 0,
+      q,
+    );
   }
 
   async getRow(tenantId: string, executor: Executor = this.deps.db) {
@@ -189,6 +201,10 @@ export class TenantService {
       profile: presentProfileExtras(profile),
       settings: settings ? presentSettings(settings) : null,
       member_count: members?.n ?? 0,
+      apps: {
+        teacher_app: snapshot.features.includes(APP_FEATURES.teacher_app),
+        parent_app: snapshot.features.includes(APP_FEATURES.parent_app),
+      },
       entitlements: presentSnapshot(snapshot),
     };
   }
@@ -377,6 +393,9 @@ export class TenantService {
       }
       assertTransition(tenant.status, to);
       await this.setStatus(tx, tenant, to, reason, actor);
+      // A disabled school signs everyone out at once (they cannot sign in again until enabled).
+      if (to !== 'ACTIVE' && isSimpleMode(this.deps.env))
+        await this.revokeSchoolSessions(tx, tenantId, 'SCHOOL_DISABLED');
       return this.getRow(tenantId, tx);
     });
     await this.entitlements.invalidate(tenantId);
@@ -433,7 +452,12 @@ export class TenantService {
    */
   async provision(tenantId: string, input: z.infer<typeof ProvisionBody>, actor: Actor) {
     // Hashing is slow, so do it before the transaction opens.
-    const adminPasswordHash = input.admin.password ? await hashPassword(input.admin.password) : null;
+    const adminPasswordHash = input.admin.password
+      ? await hashPassword(input.admin.password)
+      : null;
+    const adminPhone = input.admin.mobile
+      ? await normalizeLoginPhone(this.deps.db, input.admin.mobile, tenantId)
+      : null;
     const result = await this.deps.db.transaction(async (tx) => {
       const [tenant] = await tx
         .select()
@@ -456,20 +480,29 @@ export class TenantService {
           .where(eq(tenantSettings.tenantId, tenantId));
       }
 
-      const started = await this.startSubscription(
-        tx,
-        tenantId,
-        {
-          planCode: input.plan_code,
-          status: input.trial_days > 0 ? 'TRIAL' : 'ACTIVE',
-          billingInterval: input.billing_interval,
-          trialDays: input.trial_days,
-          autoRenew: true,
-          discountMinor: input.discount_minor,
-          payment: input.payment,
-        },
-        { ...actor, tenantId },
-      );
+      const simple = isSimpleMode(this.deps.env);
+      if (!simple && !input.plan_code)
+        throw new ValidationError('Choose a plan', {
+          location: 'body',
+          issues: [{ path: 'plan_code', message: 'Choose a plan' }],
+        });
+      // Simple mode: no plan or subscription; every feature is on and the apps are switches.
+      const started = simple
+        ? { id: null, invoiceId: null }
+        : await this.startSubscription(
+            tx,
+            tenantId,
+            {
+              planCode: input.plan_code!,
+              status: input.trial_days > 0 ? 'TRIAL' : 'ACTIVE',
+              billingInterval: input.billing_interval,
+              trialDays: input.trial_days,
+              autoRenew: true,
+              discountMinor: input.discount_minor,
+              payment: input.payment,
+            },
+            { ...actor, tenantId },
+          );
 
       const [adminRole] = await tx
         .select()
@@ -487,6 +520,7 @@ export class TenantService {
         tx,
         {
           email: input.admin.email,
+          loginPhone: adminPhone,
           firstName: input.admin.first_name,
           lastName: input.admin.last_name,
           tenantId,
@@ -509,6 +543,20 @@ export class TenantService {
           { ...actor, tenantId },
         );
 
+      if (simple) {
+        for (const app of Object.keys(APP_FEATURES) as AppSwitch[]) {
+          if (input[app])
+            await this.writeAppSwitch(
+              tx,
+              tenantId,
+              app,
+              true,
+              'Switched on at school set-up',
+              actor,
+            );
+        }
+      }
+
       await this.setStatus(tx, tenant, 'ACTIVE', 'Provisioning completed', actor);
       await recordAudit(tx, actor, {
         tenantId,
@@ -516,10 +564,13 @@ export class TenantService {
         entityType: 'tenant',
         entityId: tenantId,
         after: {
-          plan_code: input.plan_code,
+          plan_code: input.plan_code ?? null,
+          teacher_app: input.teacher_app,
+          parent_app: input.parent_app,
           subscription_id: started.id,
           invoice_id: started.invoiceId,
-          admin_email: input.admin.email,
+          admin_email: input.admin.email ?? null,
+          admin_login_phone: adminPhone,
           admin_login: adminPasswordHash ? 'PASSWORD_SET' : 'INVITED',
         },
       });
@@ -554,6 +605,176 @@ export class TenantService {
     };
   }
 
+  // ---------------------------------------------------------------------------
+  // Mobile app switches (simple mode)
+  // ---------------------------------------------------------------------------
+
+  /** Switch the Teacher app and/or Parent app on or off for a school. */
+  async setApps(tenantId: string, input: z.infer<typeof AppsBody>, actor: Actor) {
+    if (!isSimpleMode(this.deps.env))
+      throw new BusinessRuleError(
+        'OPERATION_NOT_ALLOWED',
+        'App switches are part of the simple product mode. Use the plan and overrides instead.',
+      );
+    await this.deps.db.transaction(async (tx) => {
+      const [tenant] = await tx
+        .select()
+        .from(tenants)
+        .where(eq(tenants.id, tenantId))
+        .for('update');
+      if (!tenant) throw new NotFoundError('School');
+      if (tenant.status === 'ARCHIVED')
+        throw new BusinessRuleError('INVALID_STATE', 'An archived school cannot be changed');
+      const current = (await this.appsOf([tenantId], tx)).get(tenantId) ?? NO_APPS;
+      for (const app of Object.keys(APP_FEATURES) as AppSwitch[]) {
+        const want = input[app];
+        if (want === undefined || want === current[app]) continue;
+        const name = app === 'teacher_app' ? 'Teacher' : 'Parent';
+        const why = input.reason ?? `${name} app switched ${want ? 'on' : 'off'}`;
+        await this.writeAppSwitch(tx, tenantId, app, want, why, actor);
+        // Signed-in teachers / parents lose the app at once.
+        if (!want)
+          await this.revokeSchoolSessions(
+            tx,
+            tenantId,
+            'APP_DISABLED',
+            app === 'teacher_app' ? 'TEACHER' : 'PARENT',
+          );
+      }
+    });
+    await Promise.all([
+      this.entitlements.invalidate(tenantId),
+      this.authz.invalidateTenant(tenantId),
+    ]);
+    return this.detail(tenantId);
+  }
+
+  /** One app switch: an ADMIN_OVERRIDE GRANT while on; the GRANT is revoked when off. */
+  private async writeAppSwitch(
+    tx: Executor,
+    tenantId: string,
+    app: AppSwitch,
+    on: boolean,
+    reason: string,
+    actor: Actor,
+  ) {
+    const [feature] = await tx
+      .select({ id: features.id })
+      .from(features)
+      .where(eq(features.code, APP_FEATURES[app]));
+    if (!feature) throw new Error(`Feature ${APP_FEATURES[app]} is missing — run the seed`);
+    const now = this.deps.clock.now();
+    await tx
+      .update(entitlementRows)
+      .set({ status: 'REVOKED', endsAt: now })
+      .where(
+        and(
+          eq(entitlementRows.tenantId, tenantId),
+          eq(entitlementRows.featureId, feature.id),
+          eq(entitlementRows.sourceType, 'ADMIN_OVERRIDE'),
+          eq(entitlementRows.status, 'ACTIVE'),
+        ),
+      );
+    if (on)
+      await tx.insert(entitlementRows).values({
+        tenantId,
+        featureId: feature.id,
+        sourceType: 'ADMIN_OVERRIDE',
+        effect: 'GRANT',
+        startsAt: now,
+        grantedBy: actor.userId,
+        reason,
+      });
+    await recordAudit(tx, actor, {
+      tenantId,
+      action: on ? 'SCHOOL_APP_ENABLED' : 'SCHOOL_APP_DISABLED',
+      entityType: 'tenant',
+      entityId: tenantId,
+      after: { app, on },
+      reason,
+    });
+    await publishEvent(tx, actor, {
+      tenantId,
+      eventType: 'entitlement.changed',
+      aggregateType: 'tenant',
+      aggregateId: tenantId,
+      payload: {
+        tenant_id: tenantId,
+        feature: APP_FEATURES[app],
+        effect: on ? 'GRANT' : 'REMOVED',
+      },
+    });
+  }
+
+  /** Which app switches are on, per school (simple mode: an active GRANT override). */
+  private async appsOf(tenantIds: string[], executor: Executor = this.deps.db) {
+    const out = new Map<string, Record<AppSwitch, boolean>>();
+    if (tenantIds.length === 0) return out;
+    const now = this.deps.clock.now();
+    const rows = await executor
+      .select({
+        tenantId: entitlementRows.tenantId,
+        code: features.code,
+        endsAt: entitlementRows.endsAt,
+      })
+      .from(entitlementRows)
+      .innerJoin(features, eq(features.id, entitlementRows.featureId))
+      .where(
+        and(
+          inArray(entitlementRows.tenantId, tenantIds),
+          inArray(features.code, Object.values(APP_FEATURES)),
+          eq(entitlementRows.sourceType, 'ADMIN_OVERRIDE'),
+          eq(entitlementRows.effect, 'GRANT'),
+          eq(entitlementRows.status, 'ACTIVE'),
+        ),
+      );
+    for (const r of rows) {
+      if (r.endsAt && r.endsAt <= now) continue;
+      const apps = out.get(r.tenantId) ?? { ...NO_APPS };
+      if (r.code === APP_FEATURES.teacher_app) apps.teacher_app = true;
+      if (r.code === APP_FEATURES.parent_app) apps.parent_app = true;
+      out.set(r.tenantId, apps);
+    }
+    return out;
+  }
+
+  /**
+   * Sign out a school's users: everyone (school disabled) or only the holders of one system
+   * role (an app switched off). A School Admin who also holds that role keeps the session.
+   */
+  private async revokeSchoolSessions(
+    tx: Executor,
+    tenantId: string,
+    reason: 'SCHOOL_DISABLED' | 'APP_DISABLED',
+    roleCode?: 'TEACHER' | 'PARENT',
+  ) {
+    let membershipIds: string[];
+    if (!roleCode) {
+      const rows = await tx
+        .select({ id: memberships.id })
+        .from(memberships)
+        .where(eq(memberships.tenantId, tenantId));
+      membershipIds = rows.map((r) => r.id);
+    } else {
+      const rows = await tx
+        .select({ id: roleAssignments.membershipId, code: roles.code })
+        .from(roleAssignments)
+        .innerJoin(roles, eq(roles.id, roleAssignments.roleId))
+        .where(and(eq(roleAssignments.tenantId, tenantId), eq(roleAssignments.status, 'ACTIVE')));
+      const admins = new Set(rows.filter((r) => r.code === 'SCHOOL_ADMIN').map((r) => r.id));
+      membershipIds = [
+        ...new Set(rows.filter((r) => r.code === roleCode && !admins.has(r.id)).map((r) => r.id)),
+      ];
+    }
+    if (membershipIds.length === 0) return;
+    await tx
+      .update(userSessions)
+      .set({ revokedAt: this.deps.clock.now(), revokedReason: reason })
+      .where(
+        and(inArray(userSessions.membershipId, membershipIds), isNull(userSessions.revokedAt)),
+      );
+  }
+
   /** The school's admins (School Admin role), with whether each login is ready to use. */
   async listAdmins(tenantId: string) {
     await this.getRow(tenantId);
@@ -563,25 +784,37 @@ export class TenantService {
       .innerJoin(users, eq(users.id, memberships.userId))
       .innerJoin(
         roleAssignments,
-        and(
-          eq(roleAssignments.membershipId, memberships.id),
-          eq(roleAssignments.status, 'ACTIVE'),
-        ),
+        and(eq(roleAssignments.membershipId, memberships.id), eq(roleAssignments.status, 'ACTIVE')),
       )
-      .innerJoin(
-        roles,
-        and(eq(roles.id, roleAssignments.roleId), eq(roles.code, 'SCHOOL_ADMIN')),
-      )
+      .innerJoin(roles, and(eq(roles.id, roleAssignments.roleId), eq(roles.code, 'SCHOOL_ADMIN')))
       .where(and(eq(memberships.tenantId, tenantId), ne(memberships.status, 'REVOKED')))
       .orderBy(memberships.createdAt);
     return rows.map(({ m, u }) => ({
       membership_id: m.id,
       email: u.email,
+      login_phone: presentLoginPhone(u.loginPhone),
       first_name: u.firstName,
       last_name: u.lastName,
       status: m.status,
       last_login_at: u.lastLoginAt,
     }));
+  }
+
+  /** The platform team changes (or, with null, removes) the mobile number a school admin signs in with. */
+  async setAdminMobile(
+    tenantId: string,
+    membershipId: string,
+    mobile: string | null,
+    actor: Actor,
+  ) {
+    const admins = await this.listAdmins(tenantId);
+    if (!admins.some((a) => a.membership_id === membershipId))
+      throw new NotFoundError('School admin');
+    const loginPhone = mobile ? await normalizeLoginPhone(this.deps.db, mobile, tenantId) : null;
+    await this.deps.db.transaction((tx) =>
+      setLoginPhoneByAdmin(tx, { tenantId, membershipId, loginPhone }, { ...actor, tenantId }),
+    );
+    return (await this.listAdmins(tenantId)).find((a) => a.membership_id === membershipId)!;
   }
 
   /**

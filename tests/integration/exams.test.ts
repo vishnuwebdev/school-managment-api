@@ -132,6 +132,13 @@ describe('exam lifecycle', () => {
       201,
     );
     expect(exam).toMatchObject({ status: 'DRAFT', stage: 'MARKING', classes: 2, papers: 3 });
+    expect(exam).toMatchObject({
+      class_names: ['Class 5', 'Class 6'],
+      class_label: 'Class 5–6',
+      teacher_name: null,
+    });
+    const listed = (await ok<Json[]>(await api.get('/exams'))).find((e) => e.id === exam.id)!;
+    expect(listed).toMatchObject({ class_label: 'Class 5–6', classes: 2 });
     expect(exam.marks_expected).toBe(7); // 3 students × 2 papers in class 5, plus 1 in class 6
     papers = await ok(await api.get(`/exams/${exam.id}/papers?class_id=${classId}`));
     expect(papers).toHaveLength(2);
@@ -152,6 +159,7 @@ describe('exam lifecycle', () => {
     const pid = papers[0]!.id as string;
     const sheet = await ok(await api.get(`/exams/papers/${pid}/marks`));
     expect(sheet.rows).toHaveLength(3);
+    expect(sheet.rows[0]).toHaveProperty('roll_number'); // shown in the admin marks grid
     const bad = await api.put(`/exams/papers/${pid}/marks`, {
       records: [{ student_id: kids[0], marks: 51 }],
     });

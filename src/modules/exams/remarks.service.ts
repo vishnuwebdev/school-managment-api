@@ -310,7 +310,19 @@ export class ExamRemarkService {
 
   /** Shared remarks of published exams for one student, with who wrote them (parent app). */
   async sharedForStudent(tenantId: string, studentId: string, examIds: string[]) {
-    if (!examIds.length) return new Map<string, { remark: string; by: string | null }>();
+    const rows = await this.shared(tenantId, [studentId], examIds);
+    return new Map(rows.map(({ examId, ...r }) => [examId, r]));
+  }
+
+  /** Shared remarks of one exam for many students, keyed by student (printed report cards). */
+  async sharedForExam(tenantId: string, examId: string, studentIds: string[]) {
+    const rows = await this.shared(tenantId, studentIds, [examId]);
+    return new Map(rows.map(({ studentId, ...r }) => [studentId, r]));
+  }
+
+  /** Only remarks the teacher chose to share with parents go on a report card. */
+  private async shared(tenantId: string, studentIds: string[], examIds: string[]) {
+    if (!studentIds.length || !examIds.length) return [];
     const rows = await this.db
       .select({
         r: examStudentRemarks,
@@ -327,23 +339,20 @@ export class ExamRemarkService {
       .where(
         and(
           eq(examStudentRemarks.tenantId, tenantId),
-          eq(examStudentRemarks.studentId, studentId),
+          inArray(examStudentRemarks.studentId, studentIds),
           eq(examStudentRemarks.shareWithParent, true),
           inArray(examStudentRemarks.examId, examIds),
         ),
       );
-    return new Map(
-      rows.map((x) => [
-        x.r.examId,
-        {
-          remark: x.r.remark,
-          by: x.t?.firstName
-            ? fullName(x.t as { firstName: string; middleName: string | null; lastName: string })
-            : x.u?.firstName
-              ? `${x.u.firstName} ${x.u.lastName}`.trim()
-              : null,
-        },
-      ]),
-    );
+    return rows.map((x) => ({
+      examId: x.r.examId,
+      studentId: x.r.studentId,
+      remark: x.r.remark,
+      by: x.t?.firstName
+        ? fullName(x.t as { firstName: string; middleName: string | null; lastName: string })
+        : x.u?.firstName
+          ? `${x.u.firstName} ${x.u.lastName}`.trim()
+          : null,
+    }));
   }
 }

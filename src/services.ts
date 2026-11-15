@@ -8,6 +8,7 @@ import { AttendanceConfigService } from "./modules/attendance/config.service.js"
 import { CorrectionService } from "./modules/attendance/corrections.service.js";
 import { ReportService } from "./modules/attendance/reports.service.js";
 import { SessionService } from "./modules/attendance/sessions.service.js";
+import { ReportCardService } from "./modules/exams/report-cards.service.js";
 import { ExamService } from "./modules/exams/exams.service.js";
 import { ExamTimetableService } from "./modules/exams/timetable.service.js";
 import { TimetableConfigService } from "./modules/timetable/config.service.js";
@@ -46,6 +47,7 @@ import { StudentExitService } from "./modules/students/exits.service.js";
 import { StudentService } from "./modules/students/students.service.js";
 import { RoleService } from "./modules/access/roles.service.js";
 import { EntitlementService } from "./modules/entitlements/entitlements.service.js";
+import { SignInPolicy } from "./modules/identity/sign-in-policy.js";
 import { AppPinService } from "./modules/identity/app-pin.js";
 import { AuthService } from "./modules/identity/auth.service.js";
 import { TokenService } from "./modules/identity/tokens.js";
@@ -73,7 +75,8 @@ export function buildServices(deps: Deps) {
   const roles = new RoleService(deps, authz);
   const members = new MemberService(deps, authz, roles);
   const pins = new AppPinService(deps);
-  const auth = new AuthService(deps, tokens, authz, pins);
+  const signInPolicy = new SignInPolicy(deps, authz, entitlements);
+  const auth = new AuthService(deps, tokens, authz, pins, signInPolicy);
   const billing = new BillingService(deps);
   const tenants = new TenantService(deps, entitlements, authz, billing);
   const schoolSetup = new SchoolSetupService(deps);
@@ -170,11 +173,18 @@ export function buildServices(deps: Deps) {
   const notices = new NoticeService(deps, fileService);
   const guardianAccess = new GuardianAccessService(deps, authz);
   const rollNumbers = new RollNumberService(deps);
+  const reportCards = new ReportCardService(deps, {
+    exams,
+    remarks: examRemarks,
+    schoolSetup,
+    files: fileService,
+  });
   const parentApp = new ParentAppService(deps, {
     attendanceReports,
     calendar,
     exams,
     remarks: examRemarks,
+    reportCards,
     learnerFees,
     feeDocuments,
     schoolSetup,
@@ -238,6 +248,7 @@ export function buildServices(deps: Deps) {
     timetableViews,
     exams,
     examTimetable,
+    reportCards,
     feeConfig,
     feeAssignments,
     feeDemands,

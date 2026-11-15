@@ -1,5 +1,6 @@
 import type { Request, Response } from 'express';
 import { z } from 'zod';
+import { sendPdf } from '../../http/pdf.js';
 import { defineRoute } from '../../http/route.js';
 import { actorFrom } from '../../platform/context.js';
 import { AuthorizationError } from '../../shared/errors.js';
@@ -47,20 +48,6 @@ function need(req: Request, feature: string) {
       { feature },
     );
 }
-
-const pdf = (res: Response, f: { data: Buffer; filename: string }) => {
-  res
-    .status(200)
-    .set({
-      'Content-Type': 'application/pdf',
-      'Content-Length': String(f.data.length),
-      'Content-Disposition': `inline; filename="${f.filename.replace(/[^\w.\- ]/g, '_')}"`,
-      'Cache-Control': 'private, no-store',
-      'X-Content-Type-Options': 'nosniff',
-    })
-    .end(f.data);
-  return undefined;
-};
 
 const file = (res: Response, f: { mime: string; data: Buffer; checksum: string; name: string }) => {
   res.status(200).set(fileHeaders(f)).end(f.data);
@@ -197,7 +184,7 @@ export function parentAppRoutes(svc: ParentAppService, notices: NoticeService) {
       params: ExamParams,
       handler: async ({ params, req, res }) => {
         need(req, 'examinations');
-        return pdf(res, await svc.reportCardPdf(caller(req), params.childId, params.examId));
+        return sendPdf(res, await svc.reportCardPdf(caller(req), params.childId, params.examId));
       },
     }),
 
@@ -227,7 +214,7 @@ export function parentAppRoutes(svc: ParentAppService, notices: NoticeService) {
       params: InvoiceParams,
       handler: async ({ params, req, res }) => {
         need(req, 'fees');
-        return pdf(res, await svc.invoicePdf(caller(req), params.childId, params.demandId));
+        return sendPdf(res, await svc.invoicePdf(caller(req), params.childId, params.demandId));
       },
     }),
     defineRoute({
@@ -240,7 +227,7 @@ export function parentAppRoutes(svc: ParentAppService, notices: NoticeService) {
       params: IdParams,
       handler: async ({ params, req, res }) => {
         need(req, 'fees');
-        return pdf(res, await svc.receiptPdf(caller(req), params.id));
+        return sendPdf(res, await svc.receiptPdf(caller(req), params.id));
       },
     }),
 

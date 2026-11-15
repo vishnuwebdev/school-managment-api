@@ -25,12 +25,15 @@ import {
   ValidationError,
 } from '../../shared/errors.js';
 import { parsePhone } from '../../shared/phone.js';
+import { presentLoginPhone } from './login-phone.js';
 import { addDays, addMinutes } from '../../shared/time.js';
 import type { AuthorizationService } from '../access/authorization.service.js';
 import type { AppPinService } from './app-pin.js';
 import { dummyVerify, hashPassword, verifyPassword } from './password.js';
 import { sessionEnded } from './session-end.js';
 import type { TokenService } from './tokens.js';
+import type { SignInPolicy } from './sign-in-policy.js';
+import type { ClientApp } from '../../catalog/product-mode.js';
 
 export interface DeviceInfo {
   deviceName?: string | null;
@@ -58,6 +61,7 @@ export class AuthService {
     private readonly tokens: TokenService,
     private readonly authz: AuthorizationService,
     private readonly pins: AppPinService,
+    private readonly signIn: SignInPolicy,
   ) {}
 
   private anonymous(meta: RequestMeta, tenantId: string | null = null): Actor {
@@ -75,6 +79,8 @@ export class AuthService {
       password: string;
       membershipId?: string;
       device?: DeviceInfo;
+      /** Which app is signing in (decides who may sign in, in simple mode). */
+      app?: ClientApp;
     },
     meta: RequestMeta,
   ) {
@@ -130,18 +136,24 @@ export class AuthService {
     if (user.status !== 'ACTIVE')
       throw new AuthorizationError('ACCOUNT_DISABLED', 'This account is not active');
 
-    const options = await this.membershipOptions(user.id);
-    if (options.length === 0)
+    const all = await this.membershipOptions(user.id);
+    if (all.length === 0)
       throw new AuthorizationError('TENANT_ACCESS_DENIED', 'You do not have access to any school');
 
     let chosen: MembershipOption | undefined;
     if (input.membershipId) {
-      chosen = options.find((o) => o.membership_id === input.membershipId);
+      chosen = all.find((o) => o.membership_id === input.membershipId);
       if (!chosen)
         throw new AuthorizationError(
           'TENANT_ACCESS_DENIED',
           'You do not have access to this school',
         );
+      await this.signIn.assert(chosen, input.app);
+    }
+    // Only the schools (or platform) this app may sign in to.
+    const options = chosen ? [chosen] : await this.signIn.filter(all, input.app);
+    if (chosen) {
+      // chosen above
     } else if (options.length === 1) {
       chosen = options[0];
     } else {
@@ -228,6 +240,7 @@ export class AuthService {
     );
     if (!chosen)
       throw new AuthorizationError('TENANT_ACCESS_DENIED', 'You do not have access to this school');
+    await this.signIn.assert(chosen, 'teacher');
 
     const device = {
       deviceName: input.device?.deviceName ?? pin.device.deviceName,
@@ -368,6 +381,20 @@ export class AuthService {
         .where(eq(userSessions.id, session.id));
       throw sessionEnded('ACCESS_REVOKED', false);
     }
+    // The school may have been disabled, or its app switched off, since sign-in.
+    const option = (await this.membershipOptions(session.userId)).find(
+      (o) => o.membership_id === session.membershipId,
+    );
+    try {
+      if (!option) throw sessionEnded('ACCESS_REVOKED', false);
+      await this.signIn.assert(option);
+    } catch (err) {
+      await this.deps.db
+        .update(userSessions)
+        .set({ revokedAt: now, revokedReason: 'ACCESS_REVOKED' })
+        .where(eq(userSessions.id, session.id));
+      throw err;
+    }
 
     return this.deps.db.transaction(async (tx) => {
       // Conditional update guards against two concurrent refreshes of the same token.
@@ -403,11 +430,17 @@ export class AuthService {
   }
 
   /** Move the current session to another of the user's memberships. */
-  async switchContext(principal: Principal, membershipId: string, meta: RequestMeta) {
+  async switchContext(
+    principal: Principal,
+    membershipId: string,
+    meta: RequestMeta,
+    app?: ClientApp,
+  ) {
     const options = await this.membershipOptions(principal.userId);
     const chosen = options.find((o) => o.membership_id === membershipId);
     if (!chosen)
       throw new AuthorizationError('TENANT_ACCESS_DENIED', 'You do not have access to this school');
+    await this.signIn.assert(chosen, app);
     const tokens = await this.deps.db.transaction(async (tx) => {
       const [current] = await tx
         .select()
@@ -774,6 +807,7 @@ export function presentUser(u: typeof users.$inferSelect) {
   return {
     id: u.id,
     email: u.email,
+    login_phone: presentLoginPhone(u.loginPhone),
     phone: u.phone,
     first_name: u.firstName,
     last_name: u.lastName,
