@@ -41,7 +41,12 @@ import { setLoginPhoneByAdmin, setPasswordByAdmin } from '../members/credentials
 import { normalizeLoginPhone, presentLoginPhone } from '../identity/login-phone.js';
 import { hashPassword } from '../identity/password.js';
 import { assertTransition } from './lifecycle.js';
-import { APP_FEATURES, isSimpleMode, type AppSwitch } from '../../catalog/product-mode.js';
+import {
+  ADMIN_PANEL_ROLES,
+  APP_FEATURES,
+  isSimpleMode,
+  type AppSwitch,
+} from '../../catalog/product-mode.js';
 import { entitlements as entitlementRows, features, userSessions } from '../../db/schema/index.js';
 import { isNull } from 'drizzle-orm';
 import { presentProfileExtras, presentSettings, presentTenant } from './presenters.js';
@@ -761,7 +766,10 @@ export class TenantService {
         .from(roleAssignments)
         .innerJoin(roles, eq(roles.id, roleAssignments.roleId))
         .where(and(eq(roleAssignments.tenantId, tenantId), eq(roleAssignments.status, 'ACTIVE')));
-      const admins = new Set(rows.filter((r) => r.code === 'SCHOOL_ADMIN').map((r) => r.id));
+      // The one deliberate role rule of simple mode lives in catalog/product-mode.ts.
+      const admins = new Set(
+        rows.filter((r) => r.code === ADMIN_PANEL_ROLES.school).map((r) => r.id),
+      );
       membershipIds = [
         ...new Set(rows.filter((r) => r.code === roleCode && !admins.has(r.id)).map((r) => r.id)),
       ];

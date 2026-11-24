@@ -156,6 +156,11 @@ describe('Teacher app switch', () => {
     expect(signedIn.status, JSON.stringify(signedIn.body)).toBe(200);
     const teacher = h.as(signedIn.body.data.access_token);
     expect((await teacher.get('/teacher/me')).status).toBe(200);
+    // The office changes the teacher's sign-in mobile without the (switched-off) Users screen.
+    const mobile = `+9197${String(Date.now()).slice(-8)}`;
+    const withMobile = ok(await s.api.put(`/teachers/${t.id}/portal-access/mobile`, { mobile }));
+    expect(withMobile.portal_access.login_phone).toBe(mobile);
+    expect((await signIn({ phone: mobile, app: 'teacher' })).status).toBe(200);
 
     // Off again: the teacher is signed out at once, cannot sign in, cannot refresh.
     ok(await root.put(`/platform/tenants/${s.tenantId}/apps`, { teacher_app: false }));

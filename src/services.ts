@@ -52,6 +52,7 @@ import { AppPinService } from "./modules/identity/app-pin.js";
 import { AuthService } from "./modules/identity/auth.service.js";
 import { TokenService } from "./modules/identity/tokens.js";
 import { BillingService } from "./modules/billing/billing.service.js";
+import { SchoolPaymentsService } from "./modules/school-payments/school-payments.service.js";
 import { PlanService } from "./modules/plans/plans.service.js";
 import { MemberService } from "./modules/members/members.service.js";
 import { SchoolSetupService } from "./modules/tenants/school-setup.service.js";
@@ -78,6 +79,7 @@ export function buildServices(deps: Deps) {
   const signInPolicy = new SignInPolicy(deps, authz, entitlements);
   const auth = new AuthService(deps, tokens, authz, pins, signInPolicy);
   const billing = new BillingService(deps);
+  const schoolPayments = new SchoolPaymentsService(deps, billing);
   const tenants = new TenantService(deps, entitlements, authz, billing);
   const schoolSetup = new SchoolSetupService(deps);
   const academic = new AcademicService(deps);
@@ -209,6 +211,7 @@ export function buildServices(deps: Deps) {
     entitlements,
     plans,
     billing,
+    schoolPayments,
     roles,
     members,
     pins,

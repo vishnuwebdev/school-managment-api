@@ -471,6 +471,8 @@ export const OPEN_REFUND_STATUSES: readonly RefundStatus[] = [
 ];
 
 export const INVOICE_STATUS = ["OPEN", "PAID", "VOID"] as const;
+/** SUBSCRIPTION = plan invoices (full model); SESSION_FEE = the yearly platform fee (school payments). */
+export const INVOICE_KIND = ["SUBSCRIPTION", "SESSION_FEE"] as const;
 export type InvoiceStatus = (typeof INVOICE_STATUS)[number];
 
 export const BILLING_PAYMENT_METHOD = [

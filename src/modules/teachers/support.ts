@@ -173,7 +173,10 @@ export async function setTeacherStatus(
     reason: o.reason ?? null,
     details:
       o.assignmentsEnded || o.details
-        ? { ...(o.details ?? {}), ...(o.assignmentsEnded ? { assignments_ended: o.assignmentsEnded } : {}) }
+        ? {
+            ...(o.details ?? {}),
+            ...(o.assignmentsEnded ? { assignments_ended: o.assignmentsEnded } : {}),
+          }
         : null,
   });
   await recordChange(tx, actor, teacher.tenantId, {

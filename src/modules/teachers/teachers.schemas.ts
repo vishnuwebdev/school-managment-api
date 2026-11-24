@@ -162,6 +162,8 @@ export const PortalAccessBody = z.object({
 });
 export const RevokePortalBody = z.object({ reason: z.string().trim().min(3).max(500).optional() });
 export const PortalPasswordBody = z.object({ password: PasswordSchema });
+/** Change (or remove, with null) the mobile number the teacher signs in with. */
+export const PortalMobileBody = z.object({ mobile: z.string().trim().min(7).max(32).nullable() });
 export const ResetPinBody = z.object({ reason: z.string().trim().min(3).max(500).optional() });
 
 // ---- Teaching assignments ----------------------------------------------------------

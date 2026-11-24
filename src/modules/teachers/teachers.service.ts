@@ -1020,6 +1020,25 @@ export class TeacherService {
     return this.get(tenantId, id, principal);
   }
 
+  /** Change (or remove, with null) the mobile number the teacher signs in with. */
+  async setPortalMobile(
+    tenantId: string,
+    id: string,
+    mobile: string | null,
+    principal: Principal,
+    actor: Actor,
+  ) {
+    const { membershipId } = await this.loginOf(tenantId, id, principal);
+    await this.members.setMobile(tenantId, membershipId, mobile, principal, actor);
+    await this.db.transaction((tx) =>
+      addTeacherHistory(tx, actor, tenantId, id, {
+        eventType: 'PORTAL_MOBILE_SET',
+        details: { membership_id: membershipId, removed: mobile === null },
+      }),
+    );
+    return this.get(tenantId, id, principal);
+  }
+
   /**
    * Reset the teacher's app PIN (forgotten or locked). The PIN is deleted; the
    * teacher signs in with the password and chooses a new one.
