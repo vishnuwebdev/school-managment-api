@@ -1,0 +1,477 @@
+import { assertWithinPlanLimit } from '../entitlements/plan-limits.js';
+import { and, count, desc, eq, inArray, isNull, like, or, sql } from 'drizzle-orm';
+import { invitations, memberships, roleAssignments, roles, userSessions, users, } from '../../db/schema/index.js';
+import { recordAudit } from '../../platform/audit.js';
+import { publishEvent } from '../../platform/outbox.js';
+import { BusinessRuleError, NotFoundError, ValidationError } from '../../shared/errors.js';
+import { offsetOf, orderFrom, pageOf } from '../../shared/pagination.js';
+import { adminCount, assertAdminSurvives, lockAdminScope } from '../access/admin-guard.js';
+import { assertCanGrant, assertScopeWithin } from '../access/roles.service.js';
+import { deletePin } from '../identity/app-pin.js';
+import { normalizeLoginPhone, presentLoginPhone } from '../identity/login-phone.js';
+import { hashPassword } from '../identity/password.js';
+import { setLoginPhoneByAdmin, setPasswordByAdmin } from './credentials.js';
+import { assignRoles, inviteMember, queueInvitation } from './invitations.js';
+/** Assignments present only after (added) or only before (removed); a scope change is both. */
+export function diffAssignments(before, after) {
+    const key = (a) => JSON.stringify([
+        a.role_id,
+        a.scope_type,
+        a.scope_ref
+            ? Object.entries(a.scope_ref)
+                .map(([k, v]) => [k, [...v].sort()])
+                .sort(([a1], [b1]) => a1.localeCompare(b1))
+            : null,
+    ]);
+    const b = new Set(before.map(key));
+    const a = new Set(after.map(key));
+    return {
+        added: after.filter((x) => !b.has(key(x))),
+        removed: before.filter((x) => !a.has(key(x))),
+    };
+}
+/**
+ * Memberships of one context: a school (tenantId) or the platform (null).
+ * Every query is filtered by tenant, so ids from another school resolve to 404.
+ */
+export class MemberService {
+    deps;
+    authz;
+    rolesSvc;
+    constructor(deps, authz, rolesSvc) {
+        this.deps = deps;
+        this.authz = authz;
+        this.rolesSvc = rolesSvc;
+    }
+    tenantFilter(tenantId) {
+        return tenantId
+            ? eq(memberships.tenantId, tenantId)
+            : and(isNull(memberships.tenantId), eq(memberships.kind, 'PLATFORM'));
+    }
+    // ---------------------------------------------------------------------------
+    // Queries
+    // ---------------------------------------------------------------------------
+    async list(tenantId, q) {
+        const conds = [this.tenantFilter(tenantId)];
+        if (q.status)
+            conds.push(eq(memberships.status, q.status));
+        if (q.search) {
+            const s = `%${q.search}%`;
+            conds.push(or(like(users.email, s), like(users.loginPhone, `%${q.search.replace(/\D/g, '') || q.search}%`), like(users.firstName, s), like(users.lastName, s)));
+        }
+        if (q.role_id) {
+            conds.push(sql `exists (select 1 from ${roleAssignments} ra where ra.membership_id = ${memberships.id} and ra.role_id = ${q.role_id} and ra.status = 'ACTIVE')`);
+        }
+        const where = and(...conds);
+        const [rows, [total]] = await Promise.all([
+            this.deps.db
+                .select({ m: memberships, u: users })
+                .from(memberships)
+                .innerJoin(users, eq(users.id, memberships.userId))
+                .where(where)
+                .orderBy(orderFrom(q, {
+                created_at: memberships.createdAt,
+                email: users.email,
+                first_name: users.firstName,
+                last_name: users.lastName,
+                status: memberships.status,
+            }, 'created_at'))
+                .limit(q.page_size)
+                .offset(offsetOf(q)),
+            this.deps.db
+                .select({ n: count() })
+                .from(memberships)
+                .innerJoin(users, eq(users.id, memberships.userId))
+                .where(where),
+        ]);
+        const ids = rows.map((r) => r.m.id);
+        const [assignments, invites] = await Promise.all([
+            this.assignmentsOf(ids),
+            this.latestInvitations(ids),
+        ]);
+        return pageOf(rows.map((r) => this.present(r.m, r.u, assignments, invites)), total?.n ?? 0, q);
+    }
+    async get(tenantId, membershipId, executor = this.deps.db) {
+        const [row] = await executor
+            .select({ m: memberships, u: users })
+            .from(memberships)
+            .innerJoin(users, eq(users.id, memberships.userId))
+            .where(and(eq(memberships.id, membershipId), this.tenantFilter(tenantId)));
+        if (!row)
+            throw new NotFoundError('Member');
+        const [assignments, invites] = await Promise.all([
+            this.assignmentsOf([membershipId], executor),
+            this.latestInvitations([membershipId], executor),
+        ]);
+        return this.present(row.m, row.u, assignments, invites);
+    }
+    async assignmentsOf(membershipIds, executor = this.deps.db) {
+        if (membershipIds.length === 0)
+            return [];
+        return executor
+            .select({
+            id: roleAssignments.id,
+            membershipId: roleAssignments.membershipId,
+            roleId: roles.id,
+            roleCode: roles.code,
+            roleName: roles.name,
+            scopeType: roleAssignments.scopeType,
+            scopeRef: roleAssignments.scopeRef,
+        })
+            .from(roleAssignments)
+            .innerJoin(roles, eq(roles.id, roleAssignments.roleId))
+            .where(and(inArray(roleAssignments.membershipId, membershipIds), eq(roleAssignments.status, 'ACTIVE')));
+    }
+    async latestInvitations(membershipIds, executor = this.deps.db) {
+        const out = new Map();
+        if (membershipIds.length === 0)
+            return out;
+        const rows = await executor
+            .select({
+            membershipId: invitations.membershipId,
+            firstName: invitations.invitedFirstName,
+            lastName: invitations.invitedLastName,
+            status: invitations.status,
+            sentAt: invitations.sentAt,
+            expiresAt: invitations.expiresAt,
+            createdAt: invitations.createdAt,
+            id: invitations.id,
+        })
+            .from(invitations)
+            .where(inArray(invitations.membershipId, membershipIds))
+            .orderBy(desc(invitations.createdAt), desc(invitations.id));
+        for (const r of rows)
+            if (!out.has(r.membershipId))
+                out.set(r.membershipId, r);
+        return out;
+    }
+    present(m, u, assignments, invites) {
+        // Until the invitee accepts, show only what the inviter typed: an invitation
+        // must never reveal the name or activity of an existing account elsewhere.
+        const pending = m.status === 'INVITED';
+        const invite = invites.get(m.id);
+        // A pending member whose latest link can no longer be used needs "Resend".
+        const expired = pending &&
+            (!invite ||
+                !['PENDING', 'SENT'].includes(invite.status) ||
+                invite.expiresAt <= this.deps.clock.now());
+        return {
+            id: m.id,
+            status: m.status,
+            kind: m.kind,
+            joined_at: m.joinedAt?.toISOString() ?? null,
+            ended_at: m.endedAt?.toISOString() ?? null,
+            created_at: m.createdAt.toISOString(),
+            user: pending
+                ? {
+                    id: u.id,
+                    email: u.email,
+                    login_phone: null,
+                    first_name: invite?.firstName ?? null,
+                    last_name: invite?.lastName ?? null,
+                    status: 'INVITED',
+                    last_login_at: null,
+                }
+                : {
+                    id: u.id,
+                    email: u.email,
+                    login_phone: presentLoginPhone(u.loginPhone),
+                    first_name: u.firstName,
+                    last_name: u.lastName,
+                    status: u.status,
+                    last_login_at: u.lastLoginAt?.toISOString() ?? null,
+                },
+            invitation: invite
+                ? {
+                    status: invite.status,
+                    sent_at: invite.sentAt?.toISOString() ?? null,
+                    expires_at: invite.expiresAt.toISOString(),
+                    expired,
+                }
+                : null,
+            roles: assignments
+                .filter((a) => a.membershipId === m.id)
+                .map((a) => ({
+                assignment_id: a.id,
+                role_id: a.roleId,
+                code: a.roleCode,
+                name: a.roleName,
+                scope_type: a.scopeType,
+                scope_ref: a.scopeRef ?? null,
+            })),
+        };
+    }
+    // ---------------------------------------------------------------------------
+    // Anti-escalation helpers
+    // ---------------------------------------------------------------------------
+    /** Caller must hold every permission (and scope) they hand out. */
+    async assertCanAssign(tx, tenantId, principal, assignments) {
+        const perms = await this.rolesSvc.permissionsOfRoles(tenantId, assignments.map((a) => a.roleId), tx);
+        for (const a of assignments) {
+            const codes = perms.get(a.roleId);
+            assertCanGrant(principal, codes);
+            assertScopeWithin(principal, codes, a.scopeType ?? (tenantId ? 'ALL_TENANT' : 'ALL_TENANTS'), a.scopeRef ?? null);
+        }
+    }
+    /** Caller must hold every permission of the roles they take away or act upon. */
+    async assertCanManage(tx, tenantId, principal, roleIds) {
+        const perms = await this.rolesSvc.permissionsOfRoles(tenantId, roleIds, tx);
+        assertCanGrant(principal, [...perms.values()].flat());
+    }
+    // ---------------------------------------------------------------------------
+    // Commands
+    // ---------------------------------------------------------------------------
+    /**
+     * Invite someone to a school (or the platform, tenantId null). With `password` the admin sets
+     * the password instead: the login is active at once and no email is sent. A login may have a
+     * sign-in mobile number; without an email it must get a password now.
+     */
+    async invite(tenantId, input, principal, actor) {
+        const { password, mobile, ...invite } = input;
+        if (!invite.email && !password)
+            throw new ValidationError('The request is invalid', {
+                location: 'body',
+                issues: [{ path: 'password', message: 'Add an email, or set a password now' }],
+            });
+        const loginPhone = mobile ? await normalizeLoginPhone(this.deps.db, mobile, tenantId) : null;
+        const passwordHash = password ? await hashPassword(password) : null;
+        const res = await this.deps.db.transaction(async (tx) => {
+            await this.assertCanAssign(tx, tenantId, principal, invite.assignments);
+            const created = await inviteMember(this.deps, tx, { ...invite, loginPhone, tenantId }, actor);
+            // The queued invitation is revoked in this transaction, so its email is never sent.
+            if (passwordHash)
+                await setPasswordByAdmin(this.deps, tx, {
+                    tenantId,
+                    membershipId: created.membershipId,
+                    passwordHash,
+                    reason: tenantId
+                        ? 'Login created with a password set by the school'
+                        : 'Login created with a password set by the platform team',
+                }, actor);
+            return created;
+        });
+        await this.authz.invalidateTenant(tenantId);
+        return this.get(tenantId, res.membershipId);
+    }
+    /**
+     * An admin sets the password of a school login (e.g. for the teacher app), or of a platform
+     * login (tenantId null). Only for accounts used there alone; see assertAccountManagedBy.
+     */
+    async setPassword(tenantId, membershipId, password, reason, principal, actor) {
+        if (membershipId === principal.membershipId)
+            throw new BusinessRuleError('OPERATION_NOT_ALLOWED', 'Use Change password to change your own password');
+        const passwordHash = await hashPassword(password);
+        await this.deps.db.transaction(async (tx) => {
+            const member = await this.get(tenantId, membershipId, tx);
+            await this.assertCanManage(tx, tenantId, principal, member.roles.map((r) => r.role_id));
+            await setPasswordByAdmin(this.deps, tx, { tenantId, membershipId, passwordHash, reason }, actor);
+        });
+        await this.authz.invalidateTenant(tenantId);
+        return this.get(tenantId, membershipId);
+    }
+    /**
+     * An admin changes (or, with null, removes) the mobile number a school login (or a platform
+     * login, tenantId null) signs in with.
+     */
+    async setMobile(tenantId, membershipId, mobile, principal, actor) {
+        const loginPhone = mobile ? await normalizeLoginPhone(this.deps.db, mobile, tenantId) : null;
+        await this.deps.db.transaction(async (tx) => {
+            const member = await this.get(tenantId, membershipId, tx);
+            if (membershipId !== principal.membershipId)
+                await this.assertCanManage(tx, tenantId, principal, member.roles.map((r) => r.role_id));
+            await setLoginPhoneByAdmin(tx, { tenantId, membershipId, loginPhone }, actor);
+        });
+        return this.get(tenantId, membershipId);
+    }
+    async resendInvitation(tenantId, membershipId, principal, actor) {
+        await this.deps.db.transaction(async (tx) => {
+            const [locked] = await tx
+                .select()
+                .from(memberships)
+                .where(and(eq(memberships.id, membershipId), this.tenantFilter(tenantId)))
+                .for('update');
+            if (!locked)
+                throw new NotFoundError('Member');
+            if (locked.status !== 'INVITED')
+                throw new BusinessRuleError('INVALID_STATE', 'Only pending invitations can be resent');
+            const member = await this.get(tenantId, membershipId, tx);
+            await this.assertCanManage(tx, tenantId, principal, member.roles.map((r) => r.role_id));
+            if (!member.user.email)
+                throw new BusinessRuleError('OPERATION_NOT_ALLOWED', 'This login has no email; set a password instead');
+            await queueInvitation(this.deps, tx, {
+                membershipId,
+                tenantId,
+                email: member.user.email,
+                firstName: member.user.first_name,
+                lastName: member.user.last_name,
+            }, actor);
+            await recordAudit(tx, actor, {
+                tenantId,
+                action: 'INVITATION_RESENT',
+                entityType: 'membership',
+                entityId: membershipId,
+            });
+        });
+        return this.get(tenantId, membershipId);
+    }
+    async setStatus(tenantId, membershipId, status, reason, principal, actor) {
+        if (membershipId === principal.membershipId)
+            throw new BusinessRuleError('OPERATION_NOT_ALLOWED', 'You cannot change your own access');
+        const result = await this.deps.db.transaction(async (tx) => {
+            await lockAdminScope(tx, tenantId);
+            const adminsBefore = await adminCount(tx, tenantId);
+            const member = await this.get(tenantId, membershipId, tx);
+            if (status === 'SUSPENDED' && member.status !== 'ACTIVE')
+                throw new BusinessRuleError('INVALID_STATE', 'Only active members can be suspended');
+            if (status === 'ACTIVE' && member.status !== 'SUSPENDED')
+                throw new BusinessRuleError('INVALID_STATE', 'Only suspended members can be reactivated');
+            await this.assertCanManage(tx, tenantId, principal, member.roles.map((r) => r.role_id));
+            if (status === 'ACTIVE' && tenantId)
+                await assertWithinPlanLimit(tx, tenantId, this.deps.clock.now(), 'STAFF_USERS');
+            await tx.update(memberships).set({ status }).where(eq(memberships.id, membershipId));
+            if (status === 'SUSPENDED') {
+                await assertAdminSurvives(tx, tenantId, adminsBefore);
+                await this.revokeSessions(tx, membershipId, 'MEMBERSHIP_SUSPENDED');
+            }
+            await recordAudit(tx, actor, {
+                tenantId,
+                action: status === 'SUSPENDED' ? 'MEMBER_SUSPENDED' : 'MEMBER_REACTIVATED',
+                entityType: 'membership',
+                entityId: membershipId,
+                before: { status: member.status },
+                after: { status },
+                reason,
+            });
+            // Facts for notifications ("your access was suspended / restored"). The reason
+            // stays in the audit log; payloads carry ids only.
+            await publishEvent(tx, actor, {
+                tenantId,
+                eventType: status === 'SUSPENDED' ? 'membership.suspended' : 'membership.reactivated',
+                aggregateType: 'membership',
+                aggregateId: membershipId,
+                payload: { membership_id: membershipId, user_id: member.user.id },
+            });
+            return this.get(tenantId, membershipId, tx);
+        });
+        await this.authz.invalidateTenant(tenantId);
+        return result;
+    }
+    /** Remove someone from the school. Their user account and history remain. */
+    async revoke(tenantId, membershipId, reason, principal, actor) {
+        if (membershipId === principal.membershipId)
+            throw new BusinessRuleError('OPERATION_NOT_ALLOWED', 'You cannot remove yourself');
+        await this.deps.db.transaction(async (tx) => {
+            await lockAdminScope(tx, tenantId);
+            const adminsBefore = await adminCount(tx, tenantId);
+            const member = await this.get(tenantId, membershipId, tx);
+            if (member.status === 'REVOKED')
+                throw new BusinessRuleError('INVALID_STATE', 'This member was already removed');
+            await this.assertCanManage(tx, tenantId, principal, member.roles.map((r) => r.role_id));
+            const now = this.deps.clock.now();
+            await tx
+                .update(memberships)
+                .set({ status: 'REVOKED', endedAt: now })
+                .where(eq(memberships.id, membershipId));
+            await tx
+                .update(roleAssignments)
+                .set({ status: 'REVOKED', endsAt: now })
+                .where(and(eq(roleAssignments.membershipId, membershipId), eq(roleAssignments.status, 'ACTIVE')));
+            await tx
+                .update(invitations)
+                .set({ status: 'REVOKED' })
+                .where(and(eq(invitations.membershipId, membershipId), inArray(invitations.status, ['PENDING', 'SENT'])));
+            await assertAdminSurvives(tx, tenantId, adminsBefore);
+            await this.revokeSessions(tx, membershipId, 'MEMBERSHIP_REVOKED');
+            // A re-invited login reuses the membership, so the old app PIN must not survive.
+            if (tenantId)
+                await deletePin(tx, tenantId, membershipId);
+            await recordAudit(tx, actor, {
+                tenantId,
+                action: 'MEMBER_REVOKED',
+                entityType: 'membership',
+                entityId: membershipId,
+                before: { status: member.status, roles: member.roles.map((r) => r.code) },
+                after: { status: 'REVOKED' },
+                reason,
+            });
+            await publishEvent(tx, actor, {
+                tenantId,
+                eventType: 'membership.revoked',
+                aggregateType: 'membership',
+                aggregateId: membershipId,
+                payload: { membership_id: membershipId, user_id: member.user.id },
+            });
+        });
+        await this.authz.invalidateTenant(tenantId);
+    }
+    /** Replace a member's role assignments. */
+    async setRoles(tenantId, membershipId, assignments, principal, actor) {
+        if (membershipId === principal.membershipId)
+            throw new BusinessRuleError('OPERATION_NOT_ALLOWED', 'You cannot change your own roles');
+        const result = await this.deps.db.transaction(async (tx) => {
+            await lockAdminScope(tx, tenantId);
+            const adminsBefore = await adminCount(tx, tenantId);
+            const member = await this.get(tenantId, membershipId, tx);
+            if (member.status === 'REVOKED')
+                throw new BusinessRuleError('INVALID_STATE', 'Removed members cannot be assigned roles');
+            // Must hold every permission being taken away, and every permission + scope being granted.
+            await this.assertCanManage(tx, tenantId, principal, member.roles.map((r) => r.role_id));
+            await this.assertCanAssign(tx, tenantId, principal, assignments);
+            const now = this.deps.clock.now();
+            await tx
+                .update(roleAssignments)
+                .set({ status: 'REVOKED', endsAt: now })
+                .where(and(eq(roleAssignments.membershipId, membershipId), eq(roleAssignments.status, 'ACTIVE')));
+            const assigned = await assignRoles(tx, { membershipId, tenantId, assignments, actor });
+            await assertAdminSurvives(tx, tenantId, adminsBefore);
+            await recordAudit(tx, actor, {
+                tenantId,
+                action: 'MEMBER_ROLES_CHANGED',
+                entityType: 'membership',
+                entityId: membershipId,
+                before: {
+                    roles: member.roles.map((r) => ({
+                        role_id: r.role_id,
+                        code: r.code,
+                        scope_type: r.scope_type,
+                        scope_ref: r.scope_ref,
+                    })),
+                },
+                after: {
+                    roles: assigned.map((a) => ({
+                        role_id: a.roleId,
+                        scope_type: a.scopeType,
+                        scope_ref: a.scopeRef,
+                    })),
+                },
+            });
+            const { added, removed } = diffAssignments(member.roles.map((r) => ({
+                role_id: r.role_id,
+                scope_type: r.scope_type,
+                scope_ref: r.scope_ref,
+            })), assigned.map((a) => ({
+                role_id: a.roleId,
+                scope_type: a.scopeType,
+                scope_ref: a.scopeRef,
+            })));
+            if (added.length || removed.length) {
+                await publishEvent(tx, actor, {
+                    tenantId,
+                    eventType: 'membership.roles_changed',
+                    aggregateType: 'membership',
+                    aggregateId: membershipId,
+                    payload: { membership_id: membershipId, user_id: member.user.id, added, removed },
+                });
+            }
+            return this.get(tenantId, membershipId, tx);
+        });
+        await this.authz.invalidateTenant(tenantId);
+        return result;
+    }
+    async revokeSessions(tx, membershipId, reason) {
+        await tx
+            .update(userSessions)
+            .set({ revokedAt: this.deps.clock.now(), revokedReason: reason })
+            .where(and(eq(userSessions.membershipId, membershipId), isNull(userSessions.revokedAt)));
+    }
+}

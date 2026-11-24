@@ -1,0 +1,881 @@
+import { and, asc, count, desc, eq, inArray, isNotNull, isNull, like, notInArray, or, sql, } from 'drizzle-orm';
+import { roles, TEACHER_LEAVING_STATUSES, teacherHistory, teachers, teachingAssignments, users, } from '../../db/schema/index.js';
+import { recordChange } from '../../platform/record.js';
+import { encryptSecret } from '../../shared/crypto.js';
+import { todayIso } from '../../shared/dates.js';
+import { BusinessRuleError, ConflictError, isDuplicateKeyError, NotFoundError, ValidationError, } from '../../shared/errors.js';
+import { offsetOf, orderFrom, pageOf } from '../../shared/pagination.js';
+import { likeOf, nextNumber } from '../students/support.js';
+import { addTeacherHistory, fullName, loadTeacher, presentTeacher, setTeacherStatus, teacherScope, refreshTeacherAccess, } from './support.js';
+/** Lifecycle rules: which command may run from which status, where it leads, what it needs. */
+const COMMANDS = {
+    onboard: {
+        from: ['PROSPECTIVE'],
+        to: 'ONBOARDING',
+        reasonRequired: false,
+        permission: 'teachers.update',
+    },
+    activate: {
+        from: ['PROSPECTIVE', 'ONBOARDING', 'INACTIVE'],
+        to: 'ACTIVE',
+        reasonRequired: false,
+        permission: 'teachers.update',
+    },
+    'start-leave': {
+        from: ['ACTIVE'],
+        to: 'ON_LEAVE',
+        reasonRequired: false,
+        permission: 'teachers.update',
+    },
+    'return-from-leave': {
+        from: ['ON_LEAVE'],
+        to: 'ACTIVE',
+        reasonRequired: false,
+        permission: 'teachers.update',
+    },
+    deactivate: {
+        from: ['ACTIVE', 'ON_LEAVE'],
+        to: 'INACTIVE',
+        reasonRequired: true,
+        permission: 'teachers.archive',
+    },
+    resign: {
+        from: ['ACTIVE', 'ON_LEAVE', 'INACTIVE'],
+        to: 'RESIGNED',
+        reasonRequired: true,
+        permission: 'teachers.archive',
+        exit: true,
+    },
+    retire: {
+        from: ['ACTIVE', 'ON_LEAVE', 'INACTIVE'],
+        to: 'RETIRED',
+        reasonRequired: false,
+        permission: 'teachers.archive',
+        exit: true,
+    },
+    terminate: {
+        from: ['ACTIVE', 'ON_LEAVE', 'INACTIVE'],
+        to: 'TERMINATED',
+        reasonRequired: true,
+        permission: 'teachers.archive',
+        exit: true,
+    },
+    archive: {
+        from: ['PROSPECTIVE', 'ONBOARDING', 'INACTIVE', 'RESIGNED', 'TERMINATED', 'RETIRED'],
+        to: 'ARCHIVED',
+        reasonRequired: false,
+        permission: 'teachers.archive',
+    },
+    restore: {
+        from: ['ARCHIVED'],
+        to: 'INACTIVE',
+        reasonRequired: false,
+        permission: 'teachers.archive',
+    },
+};
+/** Permission needed per command (teachers.archive is a sensitive permission). */
+export const COMMAND_PERMISSION = Object.fromEntries(Object.entries(COMMANDS).map(([k, v]) => [k, v.permission]));
+export class TeacherService {
+    deps;
+    members;
+    assignments;
+    qualifications;
+    classTeachers;
+    lookups;
+    calendar;
+    pins;
+    constructor(deps, members, assignments, qualifications, classTeachers, lookups, calendar, pins) {
+        this.deps = deps;
+        this.members = members;
+        this.assignments = assignments;
+        this.qualifications = qualifications;
+        this.classTeachers = classTeachers;
+        this.lookups = lookups;
+        this.calendar = calendar;
+        this.pins = pins;
+    }
+    get db() {
+        return this.deps.db;
+    }
+    // ---- list ----------------------------------------------------------------------
+    async list(tenantId, q, principal) {
+        const conds = [
+            eq(teachers.tenantId, tenantId),
+            teacherScope(principal, 'teachers.read'),
+        ];
+        if (q.status)
+            conds.push(eq(teachers.status, q.status));
+        if (q.status_group === 'LEFT')
+            conds.push(inArray(teachers.status, [...TEACHER_LEAVING_STATUSES]));
+        if (q.status_group === 'CURRENT')
+            conds.push(notInArray(teachers.status, [...TEACHER_LEAVING_STATUSES]));
+        if (q.status_group === 'JOINING')
+            conds.push(inArray(teachers.status, ['PROSPECTIVE', 'ONBOARDING']));
+        if (q.has_assignments !== undefined) {
+            const teaching = sql `exists (select 1 from ${teachingAssignments} where ${teachingAssignments.tenantId} = ${teachers.tenantId} and ${teachingAssignments.teacherId} = ${teachers.id} and ${teachingAssignments.status} = 'ACTIVE')`;
+            conds.push(q.has_assignments ? teaching : sql `not ${teaching}`);
+        }
+        if (q.employment_type)
+            conds.push(eq(teachers.employmentType, q.employment_type));
+        if (q.department)
+            conds.push(eq(teachers.department, q.department));
+        if (q.has_login !== undefined)
+            conds.push(q.has_login ? isNotNull(teachers.membershipId) : isNull(teachers.membershipId));
+        if (q.search) {
+            const s = likeOf(q.search);
+            conds.push(or(like(teachers.teacherNumber, s), like(teachers.firstName, s), like(teachers.lastName, s), like(teachers.email, s), like(teachers.phone, s), like(teachers.department, s), like(teachers.designation, s), sql `concat(${teachers.firstName}, ' ', ${teachers.lastName}) like ${s}`));
+        }
+        const where = and(...conds);
+        const [rows, [total]] = await Promise.all([
+            this.db
+                .select()
+                .from(teachers)
+                .where(where)
+                .orderBy(orderFrom({ ...q, order: q.sort ? q.order : 'asc' }, {
+                name: teachers.lastName,
+                first_name: teachers.firstName,
+                teacher_number: teachers.teacherNumber,
+                status: teachers.status,
+                department: teachers.department,
+                joining_date: teachers.joiningDate,
+                created_at: teachers.createdAt,
+            }, 'name'), asc(teachers.firstName), asc(teachers.id))
+                .limit(q.page_size)
+                .offset(offsetOf(q)),
+            this.db.select({ n: count() }).from(teachers).where(where),
+        ]);
+        const ids = rows.map((r) => r.id);
+        const [counts, subjectNames] = await Promise.all([
+            this.assignments.activeCounts(tenantId, ids),
+            this.assignments.activeSubjectNames(tenantId, ids),
+        ]);
+        return pageOf(rows.map((r) => ({
+            ...presentTeacher(r),
+            active_assignment_count: counts.get(r.id) ?? 0,
+            subjects: subjectNames.get(r.id) ?? [],
+        })), total?.n ?? 0, q);
+    }
+    /**
+     * Counts for the list's quick filters: teachers per status and status group,
+     * and current teachers (not left) with no login or no active teaching assignment.
+     */
+    async summary(tenantId, principal) {
+        const scope = and(eq(teachers.tenantId, tenantId), teacherScope(principal, 'teachers.read'));
+        const teaching = sql `exists (select 1 from ${teachingAssignments} where ${teachingAssignments.tenantId} = ${teachers.tenantId} and ${teachingAssignments.teacherId} = ${teachers.id} and ${teachingAssignments.status} = 'ACTIVE')`;
+        const [byStatus, [current]] = await Promise.all([
+            this.db
+                .select({ status: teachers.status, n: count() })
+                .from(teachers)
+                .where(scope)
+                .groupBy(teachers.status),
+            this.db
+                .select({
+                noLogin: sql `coalesce(sum(case when ${teachers.membershipId} is null then 1 else 0 end), 0)`,
+                noAssignments: sql `coalesce(sum(case when ${teaching} then 0 else 1 end), 0)`,
+            })
+                .from(teachers)
+                .where(and(scope, notInArray(teachers.status, [...TEACHER_LEAVING_STATUSES]))),
+        ]);
+        const by_status = {};
+        for (const r of byStatus)
+            by_status[r.status] = r.n;
+        const sum = (statuses) => statuses.reduce((n, s) => n + (by_status[s] ?? 0), 0);
+        const total = byStatus.reduce((n, r) => n + r.n, 0);
+        const left = sum(TEACHER_LEAVING_STATUSES);
+        return {
+            total,
+            by_status,
+            current: total - left,
+            joining: sum(['PROSPECTIVE', 'ONBOARDING']),
+            left,
+            current_without_login: Number(current?.noLogin ?? 0),
+            current_without_assignments: Number(current?.noAssignments ?? 0),
+        };
+    }
+    // ---- detail ----------------------------------------------------------------------
+    async get(tenantId, id, principal, ex = this.db) {
+        const t = await loadTeacher(ex, tenantId, id, principal, 'teachers.read');
+        const [quals, active, portal] = await Promise.all([
+            this.qualifications.forTeacher(tenantId, id, ex),
+            this.assignments.activeForTeacher(tenantId, id, ex),
+            this.portalAccess(tenantId, t, ex),
+        ]);
+        let manager = null;
+        if (t.reportingManagerId) {
+            const [m] = await ex
+                .select()
+                .from(teachers)
+                .where(and(eq(teachers.tenantId, tenantId), eq(teachers.id, t.reportingManagerId)));
+            if (m)
+                manager = { id: m.id, full_name: fullName(m), teacher_number: m.teacherNumber };
+        }
+        return {
+            ...presentTeacher(t),
+            reporting_manager: manager,
+            qualifications: quals,
+            active_assignments: active,
+            portal_access: portal,
+        };
+    }
+    /** Login information for the profile. `status` is NONE when there is no linked login. */
+    async portalAccess(tenantId, t, ex = this.db) {
+        if (!t.membershipId)
+            return {
+                status: 'NONE',
+                membership_id: null,
+                email: null,
+                login_phone: null,
+                roles: [],
+                invitation: null,
+                password_set: false,
+                last_login_at: null,
+                app_pin: null,
+            };
+        const m = await this.members.get(tenantId, t.membershipId, ex);
+        const [[account], pin] = await Promise.all([
+            ex.select({ hash: users.passwordHash }).from(users).where(eq(users.id, m.user.id)),
+            this.pins.status(tenantId, m.id, ex),
+        ]);
+        return {
+            status: m.status,
+            membership_id: m.id,
+            email: m.user.email,
+            login_phone: m.user.login_phone,
+            roles: m.roles.map((r) => ({ role_id: r.role_id, code: r.code, name: r.name })),
+            invitation: m.invitation,
+            /** The account has a password (it never says what it is). */
+            password_set: Boolean(account?.hash),
+            last_login_at: m.user.last_login_at ?? null,
+            /** Teacher app sign-in PIN: NONE, SET or LOCKED. */
+            app_pin: pin,
+        };
+    }
+    async history(tenantId, id, principal) {
+        await loadTeacher(this.db, tenantId, id, principal, 'teachers.read');
+        const rows = await this.db
+            .select()
+            .from(teacherHistory)
+            .where(and(eq(teacherHistory.tenantId, tenantId), eq(teacherHistory.teacherId, id)))
+            .orderBy(desc(teacherHistory.createdAt), desc(teacherHistory.id))
+            .limit(500);
+        return rows.map((h) => ({
+            id: h.id,
+            event_type: h.eventType,
+            from_status: h.fromStatus,
+            to_status: h.toStatus,
+            effective_date: h.effectiveDate,
+            reason: h.reason,
+            details: h.details,
+            actor_user_id: h.actorUserId,
+            created_at: h.createdAt.toISOString(),
+        }));
+    }
+    // ---- duplicates ------------------------------------------------------------------
+    /**
+     * Duplicate handling is a warning, never an automatic merge: same email, same
+     * phone, or same name + date of birth. The user decides.
+     */
+    async findDuplicates(ex, tenantId, p, excludeId) {
+        const signals = [];
+        if (p.email)
+            signals.push(sql `lower(${teachers.email}) = lower(${p.email})`);
+        if (p.phone)
+            signals.push(sql `${teachers.phone} = ${p.phone}`);
+        if (p.dateOfBirth)
+            signals.push(sql `(lower(${teachers.firstName}) = lower(${p.firstName}) and lower(${teachers.lastName}) = lower(${p.lastName}) and ${teachers.dateOfBirth} = ${p.dateOfBirth})`);
+        if (!signals.length)
+            return [];
+        const rows = await ex
+            .select()
+            .from(teachers)
+            .where(and(eq(teachers.tenantId, tenantId), sql `(${sql.join(signals, sql ` or `)})`, excludeId ? sql `${teachers.id} <> ${excludeId}` : undefined))
+            .limit(5);
+        return rows.map((r) => ({
+            id: r.id,
+            teacher_number: r.teacherNumber,
+            full_name: fullName(r),
+            date_of_birth: r.dateOfBirth,
+            status: r.status,
+            matched_on: [
+                ...(p.email && r.email?.toLowerCase() === p.email.toLowerCase() ? ['email'] : []),
+                ...(p.phone && r.phone === p.phone ? ['phone'] : []),
+                ...(p.dateOfBirth &&
+                    r.dateOfBirth === p.dateOfBirth &&
+                    r.firstName.toLowerCase() === p.firstName.toLowerCase() &&
+                    r.lastName.toLowerCase() === p.lastName.toLowerCase()
+                    ? ['name_and_date_of_birth']
+                    : []),
+            ],
+        }));
+    }
+    get cryptoKey() {
+        return this.deps.env.DATA_ENCRYPTION_KEY ?? this.deps.env.JWT_SECRET;
+    }
+    idNumberColumns(value) {
+        if (value === undefined)
+            return {};
+        if (value === null)
+            return { idNumberEnc: null, idNumberLast4: null };
+        const clean = value.replace(/\s+/g, '');
+        return {
+            idNumberEnc: encryptSecret(clean, this.cryptoKey),
+            idNumberLast4: clean.slice(-4),
+        };
+    }
+    /** The manager must be another staff member of this school, and the chain must not loop back. */
+    async assertManager(ex, tenantId, teacherId, managerId) {
+        if (!managerId)
+            return;
+        if (managerId === teacherId)
+            throw new ValidationError('A staff member cannot report to themselves', [
+                { field: 'reporting_manager_id', message: 'Choose someone else' },
+            ]);
+        let cursor = managerId;
+        for (let depth = 0; cursor && depth < 20; depth++) {
+            const [row] = await ex
+                .select({ id: teachers.id, manager: teachers.reportingManagerId, status: teachers.status })
+                .from(teachers)
+                .where(and(eq(teachers.tenantId, tenantId), eq(teachers.id, cursor)));
+            if (!row)
+                throw new ValidationError('Reporting manager not found', [
+                    { field: 'reporting_manager_id', message: 'This person is not in your school' },
+                ]);
+            if (depth === 0 && row.status === 'ARCHIVED')
+                throw new ValidationError('Reporting manager is archived', [
+                    { field: 'reporting_manager_id', message: 'Choose an active staff member' },
+                ]);
+            if (teacherId && row.manager === teacherId)
+                throw new ValidationError('That would create a reporting loop', [
+                    { field: 'reporting_manager_id', message: 'This person already reports to them' },
+                ]);
+            cursor = row.manager;
+        }
+    }
+    // ---- create / update -------------------------------------------------------------
+    async create(tenantId, input, principal, actor) {
+        const id = await this.db.transaction((tx) => this.insertInTx(tx, tenantId, input, actor));
+        return this.get(tenantId, id, principal);
+    }
+    /** The whole create, inside the caller's transaction (also used by the bulk import). */
+    async insertInTx(tx, tenantId, input, actor) {
+        await this.lookups.assertAllowed(tx, tenantId, 'DEPARTMENT', input.department);
+        await this.lookups.assertAllowed(tx, tenantId, 'DESIGNATION', input.designation);
+        await this.assertManager(tx, tenantId, null, input.reporting_manager_id);
+        const dups = await this.findDuplicates(tx, tenantId, {
+            firstName: input.first_name,
+            lastName: input.last_name,
+            dateOfBirth: input.date_of_birth,
+            phone: input.phone,
+            email: input.email,
+        });
+        if (dups.length && !input.confirm_duplicate)
+            throw new ConflictError('CONFIRMATION_REQUIRED', 'A teacher or staff member with the same details already exists. Review and confirm to create anyway.', { duplicates: dups });
+        const now = this.deps.clock.now();
+        const teacherNumber = input.teacher_number ?? (await nextNumber(tx, tenantId, 'TCH', now));
+        let newId;
+        try {
+            const [ins] = await tx
+                .insert(teachers)
+                .values({
+                tenantId,
+                teacherNumber,
+                status: input.status,
+                firstName: input.first_name,
+                middleName: input.middle_name ?? null,
+                lastName: input.last_name,
+                preferredName: input.preferred_name ?? null,
+                dateOfBirth: input.date_of_birth ?? null,
+                gender: input.gender ?? 'UNDISCLOSED',
+                email: input.email ?? null,
+                phone: input.phone ?? null,
+                address: input.address ?? null,
+                joiningDate: input.joining_date ?? null,
+                employmentType: input.employment_type ?? 'FULL_TIME',
+                department: input.department ?? null,
+                designation: input.designation ?? null,
+                emergencyContactName: input.emergency_contact_name ?? null,
+                emergencyContactPhone: input.emergency_contact_phone ?? null,
+                emergencyContactRelation: input.emergency_contact_relation ?? null,
+                reportingManagerId: input.reporting_manager_id ?? null,
+                ...this.idNumberColumns(input.id_number),
+                notes: input.notes ?? null,
+                statusChangedAt: now,
+                createdBy: actor.userId,
+                updatedBy: actor.userId,
+            })
+                .$returningId();
+            newId = ins.id;
+        }
+        catch (err) {
+            if (isDuplicateKeyError(err))
+                throw new ConflictError('DUPLICATE_RESOURCE', `Teacher number ${teacherNumber} is already in use`, { field: 'teacher_number' });
+            throw err;
+        }
+        const [row] = await tx.select().from(teachers).where(eq(teachers.id, newId));
+        await addTeacherHistory(tx, actor, tenantId, newId, {
+            eventType: 'TEACHER_CREATED',
+            toStatus: input.status,
+            effectiveDate: todayIso(this.deps.clock),
+        });
+        await recordChange(tx, actor, tenantId, {
+            action: 'TEACHER_CREATED',
+            entityType: 'teacher',
+            entityId: newId,
+            event: 'teacher.created',
+            after: presentTeacher(row),
+            payload: {
+                teacher_number: row.teacherNumber,
+                status: input.status,
+            },
+        });
+        if (input.qualifications?.length)
+            await this.qualifications.insertInTx(tx, tenantId, newId, input.qualifications, actor);
+        return newId;
+    }
+    async update(tenantId, id, input, principal, actor) {
+        await this.db.transaction(async (tx) => {
+            const before = await loadTeacher(tx, tenantId, id, principal, 'teachers.update', {
+                lock: true,
+            });
+            if (before.status === 'ARCHIVED')
+                throw new BusinessRuleError('INVALID_STATE', 'Archived teachers cannot be edited');
+            const pick = (v, cur) => (v === undefined ? cur : v);
+            await this.lookups.assertAllowed(tx, tenantId, 'DEPARTMENT', input.department, before.department);
+            await this.lookups.assertAllowed(tx, tenantId, 'DESIGNATION', input.designation, before.designation);
+            if (input.reporting_manager_id !== undefined &&
+                input.reporting_manager_id !== before.reportingManagerId)
+                await this.assertManager(tx, tenantId, id, input.reporting_manager_id);
+            const next = {
+                ...this.idNumberColumns(input.id_number),
+                emergencyContactName: pick(input.emergency_contact_name, before.emergencyContactName),
+                emergencyContactPhone: pick(input.emergency_contact_phone, before.emergencyContactPhone),
+                emergencyContactRelation: pick(input.emergency_contact_relation, before.emergencyContactRelation),
+                reportingManagerId: pick(input.reporting_manager_id, before.reportingManagerId),
+                teacherNumber: input.teacher_number ?? before.teacherNumber,
+                firstName: input.first_name ?? before.firstName,
+                middleName: pick(input.middle_name, before.middleName),
+                lastName: input.last_name ?? before.lastName,
+                preferredName: pick(input.preferred_name, before.preferredName),
+                dateOfBirth: pick(input.date_of_birth, before.dateOfBirth),
+                gender: input.gender ?? before.gender,
+                email: pick(input.email, before.email),
+                phone: pick(input.phone, before.phone),
+                address: pick(input.address, before.address),
+                joiningDate: pick(input.joining_date, before.joiningDate),
+                employmentType: input.employment_type ?? before.employmentType,
+                department: pick(input.department, before.department),
+                designation: pick(input.designation, before.designation),
+                notes: pick(input.notes, before.notes),
+            };
+            try {
+                const [res] = await tx
+                    .update(teachers)
+                    .set({ ...next, version: before.version + 1, updatedBy: actor.userId })
+                    .where(and(eq(teachers.id, id), eq(teachers.version, input.version)));
+                if (res.affectedRows !== 1)
+                    throw new ConflictError('CONFLICT', undefined, { current_version: before.version });
+            }
+            catch (err) {
+                if (isDuplicateKeyError(err))
+                    throw new ConflictError('DUPLICATE_RESOURCE', `Teacher number ${next.teacherNumber} is already in use`, { field: 'teacher_number' });
+                throw err;
+            }
+            const [after] = await tx.select().from(teachers).where(eq(teachers.id, id));
+            const was = presentTeacher(before);
+            const changed = Object.entries(presentTeacher(after))
+                .filter(([k, v]) => !['version', 'updated_at', 'status_changed_at'].includes(k) &&
+                JSON.stringify(v) !== JSON.stringify(was[k]))
+                .map(([k]) => k);
+            await addTeacherHistory(tx, actor, tenantId, id, {
+                eventType: 'TEACHER_UPDATED',
+                details: { fields: changed },
+            });
+            await recordChange(tx, actor, tenantId, {
+                action: 'TEACHER_UPDATED',
+                entityType: 'teacher',
+                entityId: id,
+                event: 'teacher.updated',
+                before: presentTeacher(before),
+                after: presentTeacher(after),
+                payload: { fields: changed },
+            });
+        });
+        return this.get(tenantId, id, principal);
+    }
+    // ---- lifecycle commands ------------------------------------------------------------
+    /**
+     * Lifecycle changes are explicit commands — never a free-form `status` edit.
+     * Leaving statuses (INACTIVE, RESIGNED, RETIRED, TERMINATED, ARCHIVED) end every open
+     * assignment in the same transaction. After commit, and never failing the
+     * command, the linked login is suspended (see restrictAccess). Returning to
+     * work does NOT reinstate the login: access is restored explicitly.
+     */
+    async command(tenantId, id, command, input, principal, actor) {
+        const rule = COMMANDS[command];
+        if (rule.reasonRequired && !input.reason)
+            throw new BusinessRuleError('OPERATION_NOT_ALLOWED', 'A reason is required', {
+                field: 'reason',
+            });
+        if (input.exit_date && !rule.exit)
+            throw new BusinessRuleError('OPERATION_NOT_ALLOWED', 'An exit date only applies to resign, retire and terminate', { field: 'exit_date' });
+        if (input.leave_end_date && command !== 'start-leave')
+            throw new BusinessRuleError('OPERATION_NOT_ALLOWED', 'A leave end date only applies to start leave', { field: 'leave_end_date' });
+        const today = todayIso(this.deps.clock);
+        let leftMembership = null;
+        await this.db.transaction(async (tx) => {
+            const teacher = await loadTeacher(tx, tenantId, id, principal, rule.permission, {
+                lock: true,
+            });
+            if (!rule.from.includes(teacher.status))
+                throw new BusinessRuleError('INVALID_STATE', `Cannot ${command} a teacher whose status is ${teacher.status.toLowerCase().replace('_', ' ')}`, { teacher_status: teacher.status, allowed_from: rule.from });
+            const effective = input.effective_date ?? today;
+            let leave = null;
+            if (command === 'start-leave') {
+                const to = input.leave_end_date ?? effective;
+                if (effective > today)
+                    throw new BusinessRuleError('OPERATION_NOT_ALLOWED', 'Leave must start today or earlier', { field: 'effective_date' });
+                if (to < effective)
+                    throw new BusinessRuleError('OPERATION_NOT_ALLOWED', 'The leave end date cannot be before the start date', { field: 'leave_end_date' });
+                // Weekly off days and school holidays are not counted as leave.
+                const days = (await this.calendar.workingDays(tenantId, effective, to, { kind: 'staff' }, tx)).working_days;
+                if (days === 0)
+                    throw new BusinessRuleError('OPERATION_NOT_ALLOWED', 'Every selected day is a weekly off day or a school holiday', { field: 'leave_end_date' });
+                leave = { leave_from: effective, leave_to: to, leave_days: days };
+            }
+            let exit;
+            if (rule.exit) {
+                const date = input.exit_date ?? today;
+                if (date > today)
+                    throw new BusinessRuleError('OPERATION_NOT_ALLOWED', 'The exit date cannot be in the future', {
+                        field: 'exit_date',
+                    });
+                if (teacher.joiningDate && date < teacher.joiningDate)
+                    throw new BusinessRuleError('OPERATION_NOT_ALLOWED', 'The exit date cannot be before the joining date', { field: 'exit_date', joining_date: teacher.joiningDate });
+                exit = { date, reason: input.reason ?? 'Retired' };
+            }
+            else if (command === 'activate') {
+                exit = 'clear'; // re-activating a restored former employee: the history keeps the old exit
+            }
+            let ended = 0;
+            if (TEACHER_LEAVING_STATUSES.includes(rule.to) || rule.exit) {
+                ended = await this.assignments.closeAllForTeacher(tx, actor, teacher, {
+                    endDate: exit && exit !== 'clear' ? exit.date : effective,
+                    today,
+                    reason: input.reason ?? `Teacher ${rule.to.toLowerCase()}`,
+                });
+                await this.classTeachers.endAllFor(tx, tenantId, teacher.id, input.reason ?? `Teacher ${rule.to.toLowerCase()}`, actor);
+                if (teacher.membershipId)
+                    leftMembership = teacher.membershipId;
+            }
+            await setTeacherStatus(tx, actor, teacher, rule.to, {
+                command,
+                reason: input.reason ?? null,
+                effectiveDate: effective,
+                now: this.deps.clock.now(),
+                exit,
+                assignmentsEnded: ended,
+                details: leave,
+            });
+        });
+        await refreshTeacherAccess(this.deps, tenantId);
+        const warnings = [];
+        if (leftMembership) {
+            const w = await this.restrictAccess(tenantId, id, leftMembership, `Teacher ${COMMANDS[command].to.toLowerCase()}${input.reason ? `: ${input.reason}` : ''}`, principal, actor);
+            if (w)
+                warnings.push(w);
+        }
+        return { teacher: await this.get(tenantId, id, principal), warnings };
+    }
+    /**
+     * Best effort, after commit: a departed teacher's login is suspended (or, if
+     * the invitation was never accepted, revoked). Failure — e.g. the caller may
+     * not manage the login's roles, or it is their own — is logged and reported
+     * as a warning; the lifecycle change stands.
+     */
+    async restrictAccess(tenantId, teacherId, membershipId, reason, principal, actor) {
+        const why = reason.slice(0, 500);
+        try {
+            const m = await this.members.get(tenantId, membershipId);
+            if (m.status === 'ACTIVE')
+                await this.members.setStatus(tenantId, membershipId, 'SUSPENDED', why, principal, actor);
+            else if (m.status === 'INVITED') {
+                await this.members.revoke(tenantId, membershipId, why, principal, actor);
+                await this.unlink(tenantId, teacherId, membershipId, why, actor);
+            }
+            return null;
+        }
+        catch (err) {
+            this.deps.log.warn({ err, tenant_id: tenantId, teacher_id: teacherId, membership_id: membershipId }, 'could not suspend the login of a departed teacher');
+            return {
+                code: 'PORTAL_ACCESS_NOT_SUSPENDED',
+                message: 'The teacher was updated, but their login could not be suspended automatically. Suspend it from Users.',
+            };
+        }
+    }
+    // ---- portal access -------------------------------------------------------------------
+    /** The built-in Teacher role. */
+    async teacherRoleId() {
+        const [role] = await this.db
+            .select({ id: roles.id })
+            .from(roles)
+            .where(and(eq(roles.tenantKey, 'SYSTEM'), eq(roles.code, 'TEACHER'), eq(roles.status, 'ACTIVE')));
+        if (!role)
+            throw new Error('System role TEACHER is missing — run the seed');
+        return role.id;
+    }
+    /**
+     * Give a teacher a login: invite through the members service (so the
+     * anti-escalation rules apply) and link the membership. The teacher record
+     * is never invalidated by an invitation failure.
+     */
+    async invitePortalAccess(tenantId, id, input, principal, actor) {
+        const t = await loadTeacher(this.db, tenantId, id, principal, 'teachers.portal.manage');
+        if (TEACHER_LEAVING_STATUSES.includes(t.status))
+            throw new BusinessRuleError('OPERATION_NOT_ALLOWED', 'Portal access cannot be given to a teacher who has left', { teacher_status: t.status });
+        if (t.membershipId) {
+            const existing = await this.members.get(tenantId, t.membershipId);
+            if (existing.status !== 'REVOKED')
+                throw new ConflictError('DUPLICATE_RESOURCE', 'This teacher already has portal access', {
+                    membership_id: t.membershipId,
+                });
+        }
+        const email = input.email ?? t.email ?? null;
+        if (!email && !input.mobile)
+            throw new ValidationError('The request is invalid', {
+                location: 'body',
+                issues: [
+                    {
+                        path: 'email',
+                        code: 'required',
+                        message: 'This teacher has no email address. Add an email or a mobile number.',
+                    },
+                ],
+            });
+        const roleId = input.role_id ?? (await this.teacherRoleId());
+        const member = await this.members.invite(tenantId, {
+            password: input.password,
+            email,
+            mobile: input.mobile ?? null,
+            firstName: t.preferredName ?? t.firstName,
+            lastName: t.lastName,
+            // A teacher's login sees only the sections they are assigned to, unless the
+            // school explicitly gives the role school-wide scope.
+            assignments: [
+                input.scope === 'ALL' ? { roleId } : { roleId, scopeType: 'ASSIGNED_SECTION' },
+            ],
+        }, principal, actor);
+        try {
+            await this.db.transaction(async (tx) => {
+                const teacher = await loadTeacher(tx, tenantId, id, principal, 'teachers.portal.manage', {
+                    lock: true,
+                });
+                if (teacher.membershipId && teacher.membershipId !== member.id)
+                    await this.assertRevoked(tx, tenantId, teacher.membershipId);
+                await tx
+                    .update(teachers)
+                    .set({ membershipId: member.id, version: teacher.version + 1, updatedBy: actor.userId })
+                    .where(eq(teachers.id, id));
+                await addTeacherHistory(tx, actor, tenantId, id, {
+                    eventType: input.password ? 'PORTAL_ACCESS_GRANTED' : 'PORTAL_ACCESS_INVITED',
+                    details: {
+                        membership_id: member.id,
+                        role_ids: [roleId],
+                        method: input.password ? 'PASSWORD_SET_BY_ADMIN' : 'EMAIL_INVITATION',
+                    },
+                });
+                await recordChange(tx, actor, tenantId, {
+                    action: 'TEACHER_PORTAL_ACCESS_INVITED',
+                    entityType: 'teacher',
+                    entityId: id,
+                    event: 'teacher.portal_access_invited',
+                    before: { membership_id: teacher.membershipId },
+                    after: { membership_id: member.id },
+                    payload: { membership_id: member.id, role_id: roleId },
+                });
+            });
+        }
+        catch (err) {
+            // The invitation exists but could not be linked (e.g. the membership is
+            // already linked to someone else). Leave it visible in Users for an admin.
+            this.deps.log.error({ err, tenant_id: tenantId, teacher_id: id, membership_id: member.id }, 'teacher portal invitation could not be linked');
+            if (isDuplicateKeyError(err))
+                throw new ConflictError('DUPLICATE_RESOURCE', 'That login is already linked to another teacher', { membership_id: member.id });
+            throw err;
+        }
+        await refreshTeacherAccess(this.deps, tenantId);
+        return this.get(tenantId, id, principal);
+    }
+    /** The teacher's current login, or 422 when there is none to act on. */
+    async loginOf(tenantId, id, principal) {
+        const t = await loadTeacher(this.db, tenantId, id, principal, 'teachers.portal.manage');
+        if (!t.membershipId)
+            throw new BusinessRuleError('INVALID_STATE', 'This teacher has no login. Give access first.');
+        const m = await this.members.get(tenantId, t.membershipId);
+        if (m.status === 'REVOKED')
+            throw new BusinessRuleError('INVALID_STATE', 'This teacher has no login. Give access first.');
+        return { teacher: t, membershipId: t.membershipId };
+    }
+    /**
+     * Set the teacher's sign-in password (teacher app and portal). A pending
+     * invitation is completed, the teacher is signed out everywhere and the app
+     * PIN is cleared, so the new password is needed on every device.
+     */
+    async setPortalPassword(tenantId, id, password, principal, actor) {
+        const { teacher, membershipId } = await this.loginOf(tenantId, id, principal);
+        if (TEACHER_LEAVING_STATUSES.includes(teacher.status))
+            throw new BusinessRuleError('OPERATION_NOT_ALLOWED', 'A password cannot be set for a teacher who has left', { teacher_status: teacher.status });
+        const reason = 'Password set by the school';
+        await this.members.setPassword(tenantId, membershipId, password, reason, principal, actor);
+        await this.db.transaction((tx) => addTeacherHistory(tx, actor, tenantId, id, {
+            eventType: 'PORTAL_PASSWORD_SET',
+            reason,
+            details: { membership_id: membershipId },
+        }));
+        await refreshTeacherAccess(this.deps, tenantId);
+        return this.get(tenantId, id, principal);
+    }
+    /** Change (or remove, with null) the mobile number the teacher signs in with. */
+    async setPortalMobile(tenantId, id, mobile, principal, actor) {
+        const { membershipId } = await this.loginOf(tenantId, id, principal);
+        await this.members.setMobile(tenantId, membershipId, mobile, principal, actor);
+        await this.db.transaction((tx) => addTeacherHistory(tx, actor, tenantId, id, {
+            eventType: 'PORTAL_MOBILE_SET',
+            details: { membership_id: membershipId, removed: mobile === null },
+        }));
+        return this.get(tenantId, id, principal);
+    }
+    /**
+     * Reset the teacher's app PIN (forgotten or locked). The PIN is deleted; the
+     * teacher signs in with the password and chooses a new one.
+     */
+    async resetAppPin(tenantId, id, reason, principal, actor) {
+        const { membershipId } = await this.loginOf(tenantId, id, principal);
+        const why = reason ?? 'PIN reset by the school';
+        await this.db.transaction(async (tx) => {
+            const removed = await this.pins.reset(tx, tenantId, membershipId, actor, why);
+            if (!removed)
+                throw new BusinessRuleError('INVALID_STATE', 'This teacher has no app PIN to reset');
+            await addTeacherHistory(tx, actor, tenantId, id, {
+                eventType: 'APP_PIN_RESET',
+                reason: why,
+                details: { membership_id: membershipId },
+            });
+        });
+        return this.get(tenantId, id, principal);
+    }
+    async assertRevoked(tx, tenantId, membershipId) {
+        const m = await this.members.get(tenantId, membershipId, tx).catch(() => null);
+        if (m && m.status !== 'REVOKED')
+            throw new ConflictError('DUPLICATE_RESOURCE', 'This teacher already has portal access', {
+                membership_id: membershipId,
+            });
+    }
+    /** Remove the login (revoke the membership) and clear the link. The teacher is unchanged. */
+    async revokePortalAccess(tenantId, id, reason, principal, actor) {
+        const t = await loadTeacher(this.db, tenantId, id, principal, 'teachers.portal.manage');
+        if (!t.membershipId)
+            throw new NotFoundError('Portal access');
+        const why = reason ?? 'Teacher portal access removed';
+        const m = await this.members.get(tenantId, t.membershipId);
+        if (m.status !== 'REVOKED')
+            await this.members.revoke(tenantId, t.membershipId, why, principal, actor);
+        await this.unlink(tenantId, id, t.membershipId, why, actor);
+        await refreshTeacherAccess(this.deps, tenantId);
+        return this.get(tenantId, id, principal);
+    }
+    /** Clear the teacher → membership link (only if it still points at `membershipId`). */
+    async unlink(tenantId, teacherId, membershipId, reason, actor) {
+        await this.db.transaction(async (tx) => {
+            const [t] = await tx
+                .select()
+                .from(teachers)
+                .where(and(eq(teachers.id, teacherId), eq(teachers.tenantId, tenantId)))
+                .for('update');
+            if (!t || t.membershipId !== membershipId)
+                return;
+            await tx
+                .update(teachers)
+                .set({ membershipId: null, version: t.version + 1, updatedBy: actor.userId })
+                .where(eq(teachers.id, teacherId));
+            await addTeacherHistory(tx, actor, tenantId, teacherId, {
+                eventType: 'PORTAL_ACCESS_REVOKED',
+                reason,
+                details: { membership_id: membershipId },
+            });
+            await recordChange(tx, actor, tenantId, {
+                action: 'TEACHER_PORTAL_ACCESS_REVOKED',
+                entityType: 'teacher',
+                entityId: teacherId,
+                event: 'teacher.portal_access_revoked',
+                before: { membership_id: membershipId },
+                after: { membership_id: null },
+                reason,
+                payload: { membership_id: membershipId },
+            });
+        });
+    }
+}
+// ---- CSV export ------------------------------------------------------------------------
+const CSV_HEADERS = [
+    'Teacher number',
+    'First name',
+    'Middle name',
+    'Last name',
+    'Gender',
+    'Status',
+    'Employment type',
+    'Department',
+    'Designation',
+    'Joining date',
+    'Exit date',
+    'Email',
+    'Phone',
+    'Has login',
+    'Active assignments',
+];
+/** Spreadsheet formula injection guard + CSV quoting. */
+const csvCell = (v) => {
+    let s = v === null || v === undefined ? '' : String(v);
+    if (/^[=+\-@\t\r]/.test(s))
+        s = `'${s}`;
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+};
+export async function exportTeachersCsv(svc, deps, tenantId, q, principal, actor) {
+    const lines = [CSV_HEADERS.join(',')];
+    const MAX = 10_000;
+    for (let page = 1; lines.length <= MAX; page++) {
+        const res = await svc.list(tenantId, { ...q, page, page_size: 100 }, principal);
+        for (const t of res.data)
+            lines.push([
+                t.teacher_number,
+                t.first_name,
+                t.middle_name,
+                t.last_name,
+                t.gender,
+                t.status,
+                t.employment_type,
+                t.department,
+                t.designation,
+                t.joining_date,
+                t.exit_date,
+                t.email,
+                t.phone,
+                t.has_login ? 'yes' : 'no',
+                t.active_assignment_count,
+            ]
+                .map(csvCell)
+                .join(','));
+        if (res.data.length < 100)
+            break;
+    }
+    await deps.db.transaction(async (tx) => {
+        await recordChange(tx, actor, tenantId, {
+            action: 'TEACHERS_EXPORTED',
+            entityType: 'teacher',
+            entityId: tenantId,
+            event: 'teacher.exported',
+            payload: { rows: lines.length - 1, filters: { ...q, page: undefined, page_size: undefined } },
+        });
+    });
+    return lines.join('\n') + '\n';
+}

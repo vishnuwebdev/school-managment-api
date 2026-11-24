@@ -1,0 +1,315 @@
+import { z } from 'zod';
+import { MEMBERSHIP_STATUS } from '../../db/schema/index.js';
+import { defineRoute } from '../../http/route.js';
+import { actorFrom } from '../../platform/context.js';
+import { PaginationQuery } from '../../shared/pagination.js';
+import { TENANT_SCOPE_TYPES } from '../access/scope-policy.js';
+import { PasswordSchema } from '../identity/password.js';
+const ScopeIds = z.array(z.string().uuid()).min(1).max(200);
+/**
+ * Where the role applies (D55). ASSIGNED_SECTION takes `{ "section_ids": [...] }`,
+ * ASSIGNED_CLASS `{ "class_ids": [...] }`; with no scope_ref they mean "the
+ * sections / classes this person teaches". ALL_TENANT and OWN_RECORD take none.
+ * Ids must belong to this school; a role with permissions that only work
+ * school-wide cannot be limited (422 OPERATION_NOT_ALLOWED, reason SCOPE_NOT_SUPPORTED).
+ */
+const Assignment = z.object({
+    role_id: z.string().uuid(),
+    scope_type: z.enum(TENANT_SCOPE_TYPES).default('ALL_TENANT'),
+    scope_ref: z
+        .object({ section_ids: ScopeIds.optional(), class_ids: ScopeIds.optional() })
+        .strict()
+        .nullable()
+        .optional(),
+});
+const toAssignments = (list) => list.map((a) => ({
+    roleId: a.role_id,
+    scopeType: a.scope_type,
+    scopeRef: a.scope_ref
+        ? Object.fromEntries(Object.entries(a.scope_ref).filter((e) => e[1] !== undefined))
+        : null,
+}));
+const InviteBody = z.object({
+    email: z.email().max(254),
+    first_name: z.string().trim().min(1).max(100),
+    last_name: z.string().trim().max(100).optional(),
+    roles: z.array(Assignment).min(1).max(20),
+});
+/** Email and/or a sign-in mobile number; without an email, a password now (school and platform). */
+const LoginFields = {
+    email: z.email().max(254).optional(),
+    mobile: z.string().trim().min(7).max(32).optional(),
+    password: PasswordSchema.optional(),
+};
+const loginRules = (schema) => schema
+    .refine((b) => !!b.email || !!b.mobile, {
+    message: 'Add an email or a mobile number',
+    path: ['email'],
+})
+    .refine((b) => !!b.email || !!b.password, {
+    message: 'Without an email, set a password now',
+    path: ['password'],
+});
+const SchoolInviteBody = loginRules(InviteBody.extend(LoginFields));
+const MobileBody = z.object({ mobile: z.string().trim().min(7).max(32).nullable() });
+const PasswordBody = z.object({ password: PasswordSchema });
+const IdParams = z.object({ id: z.string().uuid() });
+const Reason = z.object({ reason: z.string().trim().min(3).max(500) });
+const ListQuery = PaginationQuery.extend({
+    status: z.enum(MEMBERSHIP_STATUS).optional(),
+    role_id: z.string().uuid().optional(),
+});
+/**
+ * Users of the current school. The same service backs platform users
+ * (tenantId = null) with platform permissions.
+ */
+export function memberRoutes(members) {
+    const tid = (req) => req.ctx.tenant.tenantId;
+    return [
+        defineRoute({
+            method: 'get',
+            path: '/members',
+            summary: 'List school users',
+            tags: ['School · Users'],
+            access: 'tenant',
+            permissions: ['members.read'],
+            query: ListQuery,
+            handler: async ({ query, req }) => members.list(tid(req), query),
+        }),
+        defineRoute({
+            method: 'get',
+            path: '/members/:id',
+            summary: 'School user detail',
+            tags: ['School · Users'],
+            access: 'tenant',
+            permissions: ['members.read'],
+            params: IdParams,
+            handler: async ({ params, req }) => ({ data: await members.get(tid(req), params.id) }),
+        }),
+        defineRoute({
+            method: 'post',
+            path: '/members/invitations',
+            summary: 'Invite a user to the school with roles',
+            tags: ['School · Users'],
+            access: 'tenant',
+            permissions: ['members.invite', 'roles.assign'],
+            body: SchoolInviteBody,
+            status: 201,
+            handler: async ({ body, req }) => ({
+                data: await members.invite(tid(req), {
+                    email: body.email,
+                    mobile: body.mobile,
+                    password: body.password,
+                    firstName: body.first_name,
+                    lastName: body.last_name,
+                    assignments: toAssignments(body.roles),
+                }, req.ctx.principal, actorFrom(req.ctx)),
+            }),
+        }),
+        defineRoute({
+            method: 'post',
+            path: '/members/:id/invitations/resend',
+            summary: 'Resend a pending invitation',
+            tags: ['School · Users'],
+            access: 'tenant',
+            permissions: ['members.invite'],
+            params: IdParams,
+            handler: async ({ params, req }) => ({
+                data: await members.resendInvitation(tid(req), params.id, req.ctx.principal, actorFrom(req.ctx)),
+            }),
+        }),
+        defineRoute({
+            method: 'post',
+            path: '/members/:id/suspend',
+            summary: 'Suspend a user (signs them out)',
+            tags: ['School · Users'],
+            access: 'tenant',
+            permissions: ['members.update'],
+            params: IdParams,
+            body: Reason,
+            handler: async ({ params, body, req }) => ({
+                data: await members.setStatus(tid(req), params.id, 'SUSPENDED', body.reason, req.ctx.principal, actorFrom(req.ctx)),
+            }),
+        }),
+        defineRoute({
+            method: 'post',
+            path: '/members/:id/reactivate',
+            summary: 'Reactivate a suspended user',
+            tags: ['School · Users'],
+            access: 'tenant',
+            permissions: ['members.update'],
+            params: IdParams,
+            body: Reason,
+            handler: async ({ params, body, req }) => ({
+                data: await members.setStatus(tid(req), params.id, 'ACTIVE', body.reason, req.ctx.principal, actorFrom(req.ctx)),
+            }),
+        }),
+        defineRoute({
+            method: 'delete',
+            path: '/members/:id',
+            summary: 'Remove a user from the school (account and history are kept)',
+            tags: ['School · Users'],
+            access: 'tenant',
+            permissions: ['members.revoke'],
+            params: IdParams,
+            body: Reason,
+            status: 204,
+            handler: async ({ params, body, req }) => {
+                await members.revoke(tid(req), params.id, body.reason, req.ctx.principal, actorFrom(req.ctx));
+            },
+        }),
+        defineRoute({
+            method: 'put',
+            path: '/members/:id/mobile',
+            summary: 'Change (or remove, with null) the mobile number a user signs in with',
+            tags: ['School · Users'],
+            access: 'tenant',
+            permissions: ['members.update'],
+            params: IdParams,
+            body: MobileBody,
+            handler: async ({ params, body, req }) => ({
+                data: await members.setMobile(tid(req), params.id, body.mobile, req.ctx.principal, actorFrom(req.ctx)),
+            }),
+        }),
+        defineRoute({
+            method: 'put',
+            path: '/members/:id/password',
+            summary: "Set a user's password (signs them out everywhere; the login becomes active)",
+            tags: ['School · Users'],
+            access: 'tenant',
+            permissions: ['members.update'],
+            params: IdParams,
+            body: PasswordBody,
+            handler: async ({ params, body, req }) => ({
+                data: await members.setPassword(tid(req), params.id, body.password, 'Password set by the school', req.ctx.principal, actorFrom(req.ctx)),
+            }),
+        }),
+        defineRoute({
+            method: 'put',
+            path: '/members/:id/roles',
+            summary: "Replace a user's roles",
+            tags: ['School · Users'],
+            access: 'tenant',
+            permissions: ['roles.assign'],
+            params: IdParams,
+            body: z.object({ roles: z.array(Assignment).max(20) }),
+            handler: async ({ params, body, req }) => ({
+                data: await members.setRoles(tid(req), params.id, toAssignments(body.roles), req.ctx.principal, actorFrom(req.ctx)),
+            }),
+        }),
+    ];
+}
+/** Platform staff (memberships with kind PLATFORM). */
+export function platformUserRoutes(members) {
+    /** Platform roles apply to every school, or only to selected schools. */
+    const PlatformAssignment = z
+        .object({
+        role_id: z.string().uuid(),
+        scope_type: z.enum(['ALL_TENANTS', 'SELECTED_TENANTS']).default('ALL_TENANTS'),
+        tenant_ids: z.array(z.string().uuid()).min(1).max(500).optional(),
+    })
+        .refine((a) => a.scope_type === 'ALL_TENANTS' || a.tenant_ids, {
+        message: 'tenant_ids is required for SELECTED_TENANTS',
+        path: ['tenant_ids'],
+    });
+    const toPlatformAssignments = (list) => list.map((a) => ({
+        roleId: a.role_id,
+        scopeType: a.scope_type,
+        scopeRef: a.scope_type === 'SELECTED_TENANTS' ? { tenant_ids: a.tenant_ids } : null,
+    }));
+    return [
+        defineRoute({
+            method: 'get',
+            path: '/platform/users',
+            summary: 'List platform users',
+            tags: ['Platform · Users'],
+            access: 'platform',
+            permissions: ['platform.users.read'],
+            query: ListQuery,
+            handler: async ({ query }) => members.list(null, query),
+        }),
+        defineRoute({
+            method: 'get',
+            path: '/platform/users/:id',
+            summary: 'Platform user detail',
+            tags: ['Platform · Users'],
+            access: 'platform',
+            permissions: ['platform.users.read'],
+            params: IdParams,
+            handler: async ({ params }) => ({ data: await members.get(null, params.id) }),
+        }),
+        defineRoute({
+            method: 'post',
+            path: '/platform/users/invitations',
+            summary: 'Add a platform user (email invitation, or a password set now)',
+            tags: ['Platform · Users'],
+            access: 'platform',
+            permissions: ['platform.users.manage'],
+            status: 201,
+            body: loginRules(InviteBody.extend({ ...LoginFields, roles: z.array(PlatformAssignment).min(1).max(10) })),
+            handler: async ({ body, req }) => ({
+                data: await members.invite(null, {
+                    email: body.email,
+                    mobile: body.mobile,
+                    password: body.password,
+                    firstName: body.first_name,
+                    lastName: body.last_name,
+                    assignments: toPlatformAssignments(body.roles),
+                }, req.ctx.principal, actorFrom(req.ctx)),
+            }),
+        }),
+        defineRoute({
+            method: 'put',
+            path: '/platform/users/:id/roles',
+            summary: "Replace a platform user's roles",
+            tags: ['Platform · Users'],
+            access: 'platform',
+            permissions: ['platform.users.manage'],
+            params: IdParams,
+            body: z.object({ roles: z.array(PlatformAssignment).max(10) }),
+            handler: async ({ params, body, req }) => ({
+                data: await members.setRoles(null, params.id, toPlatformAssignments(body.roles), req.ctx.principal, actorFrom(req.ctx)),
+            }),
+        }),
+        defineRoute({
+            method: 'put',
+            path: '/platform/users/:id/mobile',
+            summary: 'Change (or remove, with null) the mobile number a platform user signs in with',
+            tags: ['Platform · Users'],
+            access: 'platform',
+            permissions: ['platform.users.manage'],
+            params: IdParams,
+            body: MobileBody,
+            handler: async ({ params, body, req }) => ({
+                data: await members.setMobile(null, params.id, body.mobile, req.ctx.principal, actorFrom(req.ctx)),
+            }),
+        }),
+        defineRoute({
+            method: 'put',
+            path: '/platform/users/:id/password',
+            summary: "Set a platform user's password (signs them out everywhere; the login becomes active)",
+            tags: ['Platform · Users'],
+            access: 'platform',
+            permissions: ['platform.users.manage'],
+            params: IdParams,
+            body: PasswordBody,
+            handler: async ({ params, body, req }) => ({
+                data: await members.setPassword(null, params.id, body.password, 'Password set by the platform team', req.ctx.principal, actorFrom(req.ctx)),
+            }),
+        }),
+        defineRoute({
+            method: 'delete',
+            path: '/platform/users/:id',
+            summary: 'Remove a platform user',
+            tags: ['Platform · Users'],
+            access: 'platform',
+            permissions: ['platform.users.manage'],
+            params: IdParams,
+            body: Reason,
+            status: 204,
+            handler: async ({ params, body, req }) => {
+                await members.revoke(null, params.id, body.reason, req.ctx.principal, actorFrom(req.ctx));
+            },
+        }),
+    ];
+}

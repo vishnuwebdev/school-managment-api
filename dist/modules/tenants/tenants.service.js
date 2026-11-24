@@ -1,0 +1,1041 @@
+import { presentSnapshot } from '../entitlements/entitlement-resolver.js';
+import { and, count, desc, eq, inArray, like, ne, or } from 'drizzle-orm';
+import { memberships, plans, planVersions, roleAssignments, roles, schoolRequests, subscriptionItems, subscriptions, tenantProfiles, tenantSettings, tenantStatusHistory, tenants, users, } from '../../db/schema/index.js';
+import { recordAudit } from '../../platform/audit.js';
+import { publishEvent } from '../../platform/outbox.js';
+import { BusinessRuleError, ConflictError, isDuplicateKeyError, NotFoundError, ValidationError, } from '../../shared/errors.js';
+import { offsetOf, orderFrom, pageOf } from '../../shared/pagination.js';
+import { addDays } from '../../shared/time.js';
+import { inviteMember } from '../members/invitations.js';
+import { setLoginPhoneByAdmin, setPasswordByAdmin } from '../members/credentials.js';
+import { normalizeLoginPhone, presentLoginPhone } from '../identity/login-phone.js';
+import { hashPassword } from '../identity/password.js';
+import { assertTransition } from './lifecycle.js';
+import { ADMIN_PANEL_ROLES, APP_FEATURES, isSimpleMode, } from '../../catalog/product-mode.js';
+import { entitlements as entitlementRows, features, userSessions } from '../../db/schema/index.js';
+import { isNull } from 'drizzle-orm';
+import { presentProfileExtras, presentSettings, presentTenant } from './presenters.js';
+const NO_APPS = { teacher_app: false, parent_app: false };
+const DEFAULT_WORKING_DAYS = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
+function profileColumns(input) {
+    const out = {};
+    if (input.name !== undefined)
+        out.name = input.name;
+    if (input.short_name !== undefined)
+        out.shortName = input.short_name;
+    if (input.school_type !== undefined)
+        out.schoolType = input.school_type;
+    if (input.contact_email !== undefined)
+        out.contactEmail = input.contact_email;
+    if (input.contact_phone !== undefined)
+        out.contactPhone = input.contact_phone;
+    const a = input.address;
+    if (a) {
+        if (a.line1 !== undefined)
+            out.addressLine1 = a.line1;
+        if (a.line2 !== undefined)
+            out.addressLine2 = a.line2;
+        if (a.city !== undefined)
+            out.city = a.city;
+        if (a.state !== undefined)
+            out.state = a.state;
+        if (a.postal_code !== undefined)
+            out.postalCode = a.postal_code;
+        if (a.country !== undefined)
+            out.country = a.country;
+    }
+    return out;
+}
+function settingsColumns(input) {
+    const out = {};
+    if (input.timezone !== undefined)
+        out.timezone = input.timezone;
+    if (input.locale !== undefined)
+        out.locale = input.locale;
+    if (input.currency !== undefined)
+        out.currency = input.currency;
+    if (input.date_format !== undefined)
+        out.dateFormat = input.date_format;
+    if (input.week_starts_on !== undefined)
+        out.weekStartsOn = input.week_starts_on;
+    if (input.working_days !== undefined)
+        out.workingDays = input.working_days;
+    if (input.academic_year_start_month !== undefined)
+        out.academicYearStartMonth = input.academic_year_start_month;
+    if (input.brand_primary_color !== undefined)
+        out.brandPrimaryColor = input.brand_primary_color;
+    if (input.brand_secondary_color !== undefined)
+        out.brandSecondaryColor = input.brand_secondary_color;
+    if (input.brand_accent_color !== undefined)
+        out.brandAccentColor = input.brand_accent_color;
+    return out;
+}
+/** Blank strings clear a field, so the form can send what the user typed. */
+const clean = (v) => (typeof v === 'string' && v.trim() === '' ? null : v);
+function profileExtrasColumns(input) {
+    const out = {};
+    const set = (key, v) => {
+        if (v !== undefined)
+            out[key] = clean(v);
+    };
+    set('affiliationBoard', input.affiliation_board);
+    set('affiliationNumber', input.affiliation_number);
+    set('schoolCode', input.school_code);
+    set('establishedYear', input.established_year);
+    set('mediumOfInstruction', input.medium_of_instruction);
+    set('motto', input.motto);
+    set('about', input.about);
+    set('secondaryPhone', input.secondary_phone);
+    set('landline', input.landline);
+    set('receptionPhone', input.reception_phone);
+    set('alternateEmail', input.alternate_email);
+    set('contactPersonName', input.contact_person_name);
+    set('contactPersonRole', input.contact_person_role);
+    set('documentFooter', input.document_footer);
+    return out;
+}
+export class TenantService {
+    deps;
+    entitlements;
+    authz;
+    billing;
+    constructor(deps, entitlements, authz, billing) {
+        this.deps = deps;
+        this.entitlements = entitlements;
+        this.authz = authz;
+        this.billing = billing;
+    }
+    // ---------------------------------------------------------------------------
+    // Queries
+    // ---------------------------------------------------------------------------
+    async list(q) {
+        const conds = [];
+        if (q.status)
+            conds.push(eq(tenants.status, q.status));
+        if (q.search)
+            conds.push(or(like(tenants.name, `%${q.search}%`), like(tenants.code, `%${q.search}%`)));
+        const where = conds.length ? and(...conds) : undefined;
+        const [rows, [total]] = await Promise.all([
+            this.deps.db
+                .select()
+                .from(tenants)
+                .where(where)
+                .orderBy(orderFrom(q, {
+                created_at: tenants.createdAt,
+                name: tenants.name,
+                code: tenants.code,
+                status: tenants.status,
+            }, 'created_at'))
+                .limit(q.page_size)
+                .offset(offsetOf(q)),
+            this.deps.db.select({ n: count() }).from(tenants).where(where),
+        ]);
+        const apps = await this.appsOf(rows.map((r) => r.id));
+        return pageOf(rows.map((r) => ({ ...presentTenant(r), apps: apps.get(r.id) ?? NO_APPS })), total?.n ?? 0, q);
+    }
+    async getRow(tenantId, executor = this.deps.db) {
+        const [row] = await executor.select().from(tenants).where(eq(tenants.id, tenantId));
+        if (!row)
+            throw new NotFoundError('School');
+        return row;
+    }
+    async detail(tenantId) {
+        const tenant = await this.getRow(tenantId);
+        const [settings] = await this.deps.db
+            .select()
+            .from(tenantSettings)
+            .where(eq(tenantSettings.tenantId, tenantId));
+        const [members] = await this.deps.db
+            .select({ n: count() })
+            .from(memberships)
+            .where(and(eq(memberships.tenantId, tenantId), inArray(memberships.status, ['ACTIVE', 'INVITED'])));
+        const [profile] = await this.deps.db
+            .select()
+            .from(tenantProfiles)
+            .where(eq(tenantProfiles.tenantId, tenantId));
+        const snapshot = await this.entitlements.snapshot(tenantId);
+        return {
+            ...presentTenant(tenant),
+            profile: presentProfileExtras(profile),
+            settings: settings ? presentSettings(settings) : null,
+            member_count: members?.n ?? 0,
+            apps: {
+                teacher_app: snapshot.features.includes(APP_FEATURES.teacher_app),
+                parent_app: snapshot.features.includes(APP_FEATURES.parent_app),
+            },
+            entitlements: presentSnapshot(snapshot),
+        };
+    }
+    async getSettings(tenantId) {
+        const [settings] = await this.deps.db
+            .select()
+            .from(tenantSettings)
+            .where(eq(tenantSettings.tenantId, tenantId));
+        if (!settings)
+            throw new NotFoundError('School settings');
+        return presentSettings(settings);
+    }
+    async statusHistory(tenantId) {
+        await this.getRow(tenantId);
+        const rows = await this.deps.db
+            .select()
+            .from(tenantStatusHistory)
+            .where(eq(tenantStatusHistory.tenantId, tenantId))
+            .orderBy(desc(tenantStatusHistory.createdAt));
+        return rows.map((r) => ({
+            id: r.id,
+            from_status: r.fromStatus,
+            to_status: r.toStatus,
+            reason: r.reason,
+            actor_user_id: r.actorUserId,
+            created_at: r.createdAt.toISOString(),
+        }));
+    }
+    // ---------------------------------------------------------------------------
+    // Commands
+    // ---------------------------------------------------------------------------
+    async create(input, actor, opts = {}) {
+        const run = async (tx) => {
+            const [row] = await tx
+                .insert(tenants)
+                .values({
+                code: input.code,
+                status: 'APPROVED',
+                createdBy: actor.userId,
+                ...profileColumns(input),
+                name: input.name,
+            })
+                .$returningId();
+            const tenantId = row.id;
+            await tx.insert(tenantSettings).values({ tenantId, workingDays: DEFAULT_WORKING_DAYS });
+            await tx.insert(tenantStatusHistory).values({
+                tenantId,
+                fromStatus: null,
+                toStatus: 'APPROVED',
+                actorUserId: actor.userId,
+                reason: opts.schoolRequestId ? 'Approved school request' : 'Created by platform',
+            });
+            await recordAudit(tx, actor, {
+                tenantId,
+                action: 'TENANT_CREATED',
+                entityType: 'tenant',
+                entityId: tenantId,
+                after: { code: input.code, name: input.name },
+            });
+            await publishEvent(tx, actor, {
+                tenantId,
+                eventType: 'tenant.created',
+                aggregateType: 'tenant',
+                aggregateId: tenantId,
+                payload: { tenant_id: tenantId, code: input.code },
+            });
+            return tenantId;
+        };
+        try {
+            const id = opts.executor ? await run(opts.executor) : await this.deps.db.transaction(run);
+            return id;
+        }
+        catch (err) {
+            if (isDuplicateKeyError(err))
+                throw new ConflictError('DUPLICATE_RESOURCE', 'A school with this code already exists', {
+                    field: 'code',
+                });
+            throw err;
+        }
+    }
+    /** Optimistic concurrency: the caller must send the version it read. */
+    async updateProfile(tenantId, input, actor) {
+        return this.deps.db.transaction(async (tx) => {
+            const before = await this.getRow(tenantId, tx);
+            const [extrasBefore] = await tx
+                .select()
+                .from(tenantProfiles)
+                .where(eq(tenantProfiles.tenantId, tenantId));
+            const changes = profileColumns(input);
+            const [res] = await tx
+                .update(tenants)
+                .set({ ...changes, version: before.version + 1 })
+                .where(and(eq(tenants.id, tenantId), eq(tenants.version, input.version)));
+            if (res.affectedRows !== 1)
+                throw new ConflictError('CONFLICT', undefined, { current_version: before.version });
+            const extras = input.profile ? profileExtrasColumns(input.profile) : {};
+            if (Object.keys(extras).length > 0) {
+                await tx
+                    .insert(tenantProfiles)
+                    .values({ tenantId, ...extras, updatedBy: actor.userId })
+                    .onDuplicateKeyUpdate({ set: { ...extras, updatedBy: actor.userId } });
+            }
+            const after = await this.getRow(tenantId, tx);
+            const [extrasAfter] = await tx
+                .select()
+                .from(tenantProfiles)
+                .where(eq(tenantProfiles.tenantId, tenantId));
+            await recordAudit(tx, actor, {
+                tenantId,
+                action: 'TENANT_UPDATED',
+                entityType: 'tenant',
+                entityId: tenantId,
+                before: { ...presentTenant(before), profile: presentProfileExtras(extrasBefore) },
+                after: { ...presentTenant(after), profile: presentProfileExtras(extrasAfter) },
+            });
+            return { ...presentTenant(after), profile: presentProfileExtras(extrasAfter) };
+        });
+    }
+    async updateSettings(tenantId, input, actor) {
+        return this.deps.db.transaction(async (tx) => {
+            const [before] = await tx
+                .select()
+                .from(tenantSettings)
+                .where(eq(tenantSettings.tenantId, tenantId));
+            if (!before)
+                throw new NotFoundError('School settings');
+            const [res] = await tx
+                .update(tenantSettings)
+                .set({ ...settingsColumns(input), version: before.version + 1, updatedBy: actor.userId })
+                .where(and(eq(tenantSettings.tenantId, tenantId), eq(tenantSettings.version, input.version)));
+            if (res.affectedRows !== 1)
+                throw new ConflictError('CONFLICT', undefined, { current_version: before.version });
+            const [after] = await tx
+                .select()
+                .from(tenantSettings)
+                .where(eq(tenantSettings.tenantId, tenantId));
+            await recordAudit(tx, actor, {
+                tenantId,
+                action: 'TENANT_SETTINGS_UPDATED',
+                entityType: 'tenant_settings',
+                entityId: tenantId,
+                before: presentSettings(before),
+                after: presentSettings(after),
+            });
+            return presentSettings(after);
+        });
+    }
+    /** Suspend / reactivate / archive. Data is always preserved. */
+    async transition(tenantId, to, reason, actor, opts = {}) {
+        const result = await this.deps.db.transaction(async (tx) => {
+            const [tenant] = await tx
+                .select()
+                .from(tenants)
+                .where(eq(tenants.id, tenantId))
+                .for('update');
+            if (!tenant)
+                throw new NotFoundError('School');
+            if (to === 'ACTIVE' && tenant.status !== 'SUSPENDED') {
+                throw new BusinessRuleError('INVALID_STATE', 'Only a suspended school can be reactivated. New schools become active through provisioning.');
+            }
+            if ((tenant.status === 'ARCHIVED') !== !!opts.restore) {
+                throw new BusinessRuleError('INVALID_STATE', opts.restore
+                    ? 'Only an archived school can be restored'
+                    : 'An archived school must be restored before any other change');
+            }
+            assertTransition(tenant.status, to);
+            await this.setStatus(tx, tenant, to, reason, actor);
+            // A disabled school signs everyone out at once (they cannot sign in again until enabled).
+            if (to !== 'ACTIVE' && isSimpleMode(this.deps.env))
+                await this.revokeSchoolSessions(tx, tenantId, 'SCHOOL_DISABLED');
+            return this.getRow(tenantId, tx);
+        });
+        await this.entitlements.invalidate(tenantId);
+        return presentTenant(result);
+    }
+    async setStatus(tx, tenant, to, reason, actor) {
+        const now = this.deps.clock.now();
+        const stamps = {};
+        if (to === 'ACTIVE')
+            stamps.activatedAt = tenant.activatedAt ?? now;
+        if (to === 'SUSPENDED')
+            stamps.suspendedAt = now;
+        if (to === 'ARCHIVED')
+            stamps.archivedAt = now;
+        await tx
+            .update(tenants)
+            .set({ status: to, ...stamps, version: tenant.version + 1 })
+            .where(eq(tenants.id, tenant.id));
+        await tx.insert(tenantStatusHistory).values({
+            tenantId: tenant.id,
+            fromStatus: tenant.status,
+            toStatus: to,
+            reason,
+            actorUserId: actor.userId,
+        });
+        await recordAudit(tx, actor, {
+            tenantId: tenant.id,
+            action: `TENANT_${to}`,
+            entityType: 'tenant',
+            entityId: tenant.id,
+            before: { status: tenant.status },
+            after: { status: to },
+            reason,
+        });
+        await publishEvent(tx, actor, {
+            tenantId: tenant.id,
+            eventType: 'tenant.status_changed',
+            aggregateType: 'tenant',
+            aggregateId: tenant.id,
+            payload: { tenant_id: tenant.id, from: tenant.status, to },
+        });
+        tenant.status = to;
+        tenant.version += 1;
+    }
+    /**
+     * Provisioning — one transaction, so a failure leaves the school APPROVED
+     * and retryable, never partially active:
+     *   settings → subscription → plan entitlements → first admin invitation → ACTIVE
+     */
+    async provision(tenantId, input, actor) {
+        // Hashing is slow, so do it before the transaction opens.
+        const adminPasswordHash = input.admin.password
+            ? await hashPassword(input.admin.password)
+            : null;
+        const adminPhone = input.admin.mobile
+            ? await normalizeLoginPhone(this.deps.db, input.admin.mobile, tenantId)
+            : null;
+        const result = await this.deps.db.transaction(async (tx) => {
+            const [tenant] = await tx
+                .select()
+                .from(tenants)
+                .where(eq(tenants.id, tenantId))
+                .for('update');
+            if (!tenant)
+                throw new NotFoundError('School');
+            if (tenant.status !== 'APPROVED')
+                throw new BusinessRuleError('INVALID_STATE', `Only an APPROVED school can be provisioned (current: ${tenant.status})`);
+            await this.setStatus(tx, tenant, 'PROVISIONING', 'Provisioning started', actor);
+            if (input.settings) {
+                await tx
+                    .update(tenantSettings)
+                    .set({ ...settingsColumns(input.settings), updatedBy: actor.userId })
+                    .where(eq(tenantSettings.tenantId, tenantId));
+            }
+            const simple = isSimpleMode(this.deps.env);
+            if (!simple && !input.plan_code)
+                throw new ValidationError('Choose a plan', {
+                    location: 'body',
+                    issues: [{ path: 'plan_code', message: 'Choose a plan' }],
+                });
+            // Simple mode: no plan or subscription; every feature is on and the apps are switches.
+            const started = simple
+                ? { id: null, invoiceId: null }
+                : await this.startSubscription(tx, tenantId, {
+                    planCode: input.plan_code,
+                    status: input.trial_days > 0 ? 'TRIAL' : 'ACTIVE',
+                    billingInterval: input.billing_interval,
+                    trialDays: input.trial_days,
+                    autoRenew: true,
+                    discountMinor: input.discount_minor,
+                    payment: input.payment,
+                }, { ...actor, tenantId });
+            const [adminRole] = await tx
+                .select()
+                .from(roles)
+                .where(and(eq(roles.tenantKey, 'SYSTEM'), eq(roles.code, 'SCHOOL_ADMIN'), eq(roles.scope, 'TENANT')));
+            if (!adminRole)
+                throw new Error('System role SCHOOL_ADMIN is missing — run the seed');
+            const invite = await inviteMember(this.deps, tx, {
+                email: input.admin.email,
+                loginPhone: adminPhone,
+                firstName: input.admin.first_name,
+                lastName: input.admin.last_name,
+                tenantId,
+                assignments: [{ roleId: adminRole.id }],
+            }, { ...actor, tenantId });
+            // Until email delivery exists, the platform team can give the admin a working login
+            // directly. This also revokes the queued invitation, so no email goes out.
+            if (adminPasswordHash)
+                await setPasswordByAdmin(this.deps, tx, {
+                    tenantId,
+                    membershipId: invite.membershipId,
+                    passwordHash: adminPasswordHash,
+                    reason: 'First school admin login created by the platform team',
+                }, { ...actor, tenantId });
+            if (simple) {
+                for (const app of Object.keys(APP_FEATURES)) {
+                    if (input[app])
+                        await this.writeAppSwitch(tx, tenantId, app, true, 'Switched on at school set-up', actor);
+                }
+            }
+            await this.setStatus(tx, tenant, 'ACTIVE', 'Provisioning completed', actor);
+            await recordAudit(tx, actor, {
+                tenantId,
+                action: 'TENANT_PROVISIONED',
+                entityType: 'tenant',
+                entityId: tenantId,
+                after: {
+                    plan_code: input.plan_code ?? null,
+                    teacher_app: input.teacher_app,
+                    parent_app: input.parent_app,
+                    subscription_id: started.id,
+                    invoice_id: started.invoiceId,
+                    admin_email: input.admin.email ?? null,
+                    admin_login_phone: adminPhone,
+                    admin_login: adminPasswordHash ? 'PASSWORD_SET' : 'INVITED',
+                },
+            });
+            await publishEvent(tx, actor, {
+                tenantId,
+                eventType: 'tenant.provisioned',
+                aggregateType: 'tenant',
+                aggregateId: tenantId,
+                payload: {
+                    tenant_id: tenantId,
+                    subscription_id: started.id,
+                    admin_membership_id: invite.membershipId,
+                },
+            });
+            return {
+                subscriptionId: started.id,
+                invoiceId: started.invoiceId,
+                adminMembershipId: invite.membershipId,
+                invitationId: invite.invitationId,
+            };
+        });
+        await Promise.all([
+            this.entitlements.invalidate(tenantId),
+            this.authz.invalidateTenant(tenantId),
+        ]);
+        return {
+            tenant: await this.detail(tenantId),
+            subscription_id: result.subscriptionId,
+            invoice_id: result.invoiceId,
+            admin_membership_id: result.adminMembershipId,
+            invitation_id: adminPasswordHash ? null : result.invitationId,
+        };
+    }
+    // ---------------------------------------------------------------------------
+    // Mobile app switches (simple mode)
+    // ---------------------------------------------------------------------------
+    /** Switch the Teacher app and/or Parent app on or off for a school. */
+    async setApps(tenantId, input, actor) {
+        if (!isSimpleMode(this.deps.env))
+            throw new BusinessRuleError('OPERATION_NOT_ALLOWED', 'App switches are part of the simple product mode. Use the plan and overrides instead.');
+        await this.deps.db.transaction(async (tx) => {
+            const [tenant] = await tx
+                .select()
+                .from(tenants)
+                .where(eq(tenants.id, tenantId))
+                .for('update');
+            if (!tenant)
+                throw new NotFoundError('School');
+            if (tenant.status === 'ARCHIVED')
+                throw new BusinessRuleError('INVALID_STATE', 'An archived school cannot be changed');
+            const current = (await this.appsOf([tenantId], tx)).get(tenantId) ?? NO_APPS;
+            for (const app of Object.keys(APP_FEATURES)) {
+                const want = input[app];
+                if (want === undefined || want === current[app])
+                    continue;
+                const name = app === 'teacher_app' ? 'Teacher' : 'Parent';
+                const why = input.reason ?? `${name} app switched ${want ? 'on' : 'off'}`;
+                await this.writeAppSwitch(tx, tenantId, app, want, why, actor);
+                // Signed-in teachers / parents lose the app at once.
+                if (!want)
+                    await this.revokeSchoolSessions(tx, tenantId, 'APP_DISABLED', app === 'teacher_app' ? 'TEACHER' : 'PARENT');
+            }
+        });
+        await Promise.all([
+            this.entitlements.invalidate(tenantId),
+            this.authz.invalidateTenant(tenantId),
+        ]);
+        return this.detail(tenantId);
+    }
+    /** One app switch: an ADMIN_OVERRIDE GRANT while on; the GRANT is revoked when off. */
+    async writeAppSwitch(tx, tenantId, app, on, reason, actor) {
+        const [feature] = await tx
+            .select({ id: features.id })
+            .from(features)
+            .where(eq(features.code, APP_FEATURES[app]));
+        if (!feature)
+            throw new Error(`Feature ${APP_FEATURES[app]} is missing — run the seed`);
+        const now = this.deps.clock.now();
+        await tx
+            .update(entitlementRows)
+            .set({ status: 'REVOKED', endsAt: now })
+            .where(and(eq(entitlementRows.tenantId, tenantId), eq(entitlementRows.featureId, feature.id), eq(entitlementRows.sourceType, 'ADMIN_OVERRIDE'), eq(entitlementRows.status, 'ACTIVE')));
+        if (on)
+            await tx.insert(entitlementRows).values({
+                tenantId,
+                featureId: feature.id,
+                sourceType: 'ADMIN_OVERRIDE',
+                effect: 'GRANT',
+                startsAt: now,
+                grantedBy: actor.userId,
+                reason,
+            });
+        await recordAudit(tx, actor, {
+            tenantId,
+            action: on ? 'SCHOOL_APP_ENABLED' : 'SCHOOL_APP_DISABLED',
+            entityType: 'tenant',
+            entityId: tenantId,
+            after: { app, on },
+            reason,
+        });
+        await publishEvent(tx, actor, {
+            tenantId,
+            eventType: 'entitlement.changed',
+            aggregateType: 'tenant',
+            aggregateId: tenantId,
+            payload: {
+                tenant_id: tenantId,
+                feature: APP_FEATURES[app],
+                effect: on ? 'GRANT' : 'REMOVED',
+            },
+        });
+    }
+    /** Which app switches are on, per school (simple mode: an active GRANT override). */
+    async appsOf(tenantIds, executor = this.deps.db) {
+        const out = new Map();
+        if (tenantIds.length === 0)
+            return out;
+        const now = this.deps.clock.now();
+        const rows = await executor
+            .select({
+            tenantId: entitlementRows.tenantId,
+            code: features.code,
+            endsAt: entitlementRows.endsAt,
+        })
+            .from(entitlementRows)
+            .innerJoin(features, eq(features.id, entitlementRows.featureId))
+            .where(and(inArray(entitlementRows.tenantId, tenantIds), inArray(features.code, Object.values(APP_FEATURES)), eq(entitlementRows.sourceType, 'ADMIN_OVERRIDE'), eq(entitlementRows.effect, 'GRANT'), eq(entitlementRows.status, 'ACTIVE')));
+        for (const r of rows) {
+            if (r.endsAt && r.endsAt <= now)
+                continue;
+            const apps = out.get(r.tenantId) ?? { ...NO_APPS };
+            if (r.code === APP_FEATURES.teacher_app)
+                apps.teacher_app = true;
+            if (r.code === APP_FEATURES.parent_app)
+                apps.parent_app = true;
+            out.set(r.tenantId, apps);
+        }
+        return out;
+    }
+    /**
+     * Sign out a school's users: everyone (school disabled) or only the holders of one system
+     * role (an app switched off). A School Admin who also holds that role keeps the session.
+     */
+    async revokeSchoolSessions(tx, tenantId, reason, roleCode) {
+        let membershipIds;
+        if (!roleCode) {
+            const rows = await tx
+                .select({ id: memberships.id })
+                .from(memberships)
+                .where(eq(memberships.tenantId, tenantId));
+            membershipIds = rows.map((r) => r.id);
+        }
+        else {
+            const rows = await tx
+                .select({ id: roleAssignments.membershipId, code: roles.code })
+                .from(roleAssignments)
+                .innerJoin(roles, eq(roles.id, roleAssignments.roleId))
+                .where(and(eq(roleAssignments.tenantId, tenantId), eq(roleAssignments.status, 'ACTIVE')));
+            // The one deliberate role rule of simple mode lives in catalog/product-mode.ts.
+            const admins = new Set(rows.filter((r) => r.code === ADMIN_PANEL_ROLES.school).map((r) => r.id));
+            membershipIds = [
+                ...new Set(rows.filter((r) => r.code === roleCode && !admins.has(r.id)).map((r) => r.id)),
+            ];
+        }
+        if (membershipIds.length === 0)
+            return;
+        await tx
+            .update(userSessions)
+            .set({ revokedAt: this.deps.clock.now(), revokedReason: reason })
+            .where(and(inArray(userSessions.membershipId, membershipIds), isNull(userSessions.revokedAt)));
+    }
+    /** The school's admins (School Admin role), with whether each login is ready to use. */
+    async listAdmins(tenantId) {
+        await this.getRow(tenantId);
+        const rows = await this.deps.db
+            .selectDistinct({ m: memberships, u: users })
+            .from(memberships)
+            .innerJoin(users, eq(users.id, memberships.userId))
+            .innerJoin(roleAssignments, and(eq(roleAssignments.membershipId, memberships.id), eq(roleAssignments.status, 'ACTIVE')))
+            .innerJoin(roles, and(eq(roles.id, roleAssignments.roleId), eq(roles.code, 'SCHOOL_ADMIN')))
+            .where(and(eq(memberships.tenantId, tenantId), ne(memberships.status, 'REVOKED')))
+            .orderBy(memberships.createdAt);
+        return rows.map(({ m, u }) => ({
+            membership_id: m.id,
+            email: u.email,
+            login_phone: presentLoginPhone(u.loginPhone),
+            first_name: u.firstName,
+            last_name: u.lastName,
+            status: m.status,
+            last_login_at: u.lastLoginAt,
+        }));
+    }
+    /** The platform team changes (or, with null, removes) the mobile number a school admin signs in with. */
+    async setAdminMobile(tenantId, membershipId, mobile, actor) {
+        const admins = await this.listAdmins(tenantId);
+        if (!admins.some((a) => a.membership_id === membershipId))
+            throw new NotFoundError('School admin');
+        const loginPhone = mobile ? await normalizeLoginPhone(this.deps.db, mobile, tenantId) : null;
+        await this.deps.db.transaction((tx) => setLoginPhoneByAdmin(tx, { tenantId, membershipId, loginPhone }, { ...actor, tenantId }));
+        return (await this.listAdmins(tenantId)).find((a) => a.membership_id === membershipId);
+    }
+    /**
+     * The platform team sets or resets a school admin's password (onboarding handover, or a
+     * forgotten password while email delivery is not built). Signs the admin out everywhere.
+     */
+    async setAdminPassword(tenantId, membershipId, password, actor) {
+        const admins = await this.listAdmins(tenantId);
+        if (!admins.some((a) => a.membership_id === membershipId))
+            throw new NotFoundError('School admin');
+        const passwordHash = await hashPassword(password);
+        await this.deps.db.transaction((tx) => setPasswordByAdmin(this.deps, tx, {
+            tenantId,
+            membershipId,
+            passwordHash,
+            reason: 'School admin password set by the platform team',
+        }, { ...actor, tenantId }));
+        await this.authz.invalidateTenant(tenantId);
+        return (await this.listAdmins(tenantId)).find((a) => a.membership_id === membershipId);
+    }
+    /** Replace the governing subscription (plan change, renewal, conversion from trial). History is preserved. */
+    async changeSubscription(tenantId, input, actor) {
+        const id = await this.deps.db.transaction(async (tx) => {
+            const [tenant] = await tx
+                .select()
+                .from(tenants)
+                .where(eq(tenants.id, tenantId))
+                .for('update');
+            if (!tenant)
+                throw new NotFoundError('School');
+            if (tenant.status === 'ARCHIVED')
+                throw new BusinessRuleError('INVALID_STATE', 'An archived school cannot change subscription');
+            const now = this.deps.clock.now();
+            const before = await this.entitlements.compute(tenantId, tx);
+            const open = await tx
+                .select()
+                .from(subscriptions)
+                .where(and(eq(subscriptions.tenantId, tenantId), inArray(subscriptions.status, ['TRIAL', 'ACTIVE', 'PAST_DUE', 'PENDING'])));
+            for (const sub of open) {
+                // Replaced, not cancelled: cancellation and expiry keep their own meaning.
+                await tx
+                    .update(subscriptions)
+                    .set({ status: 'SUPERSEDED', endedAt: now, version: sub.version + 1 })
+                    .where(eq(subscriptions.id, sub.id));
+                await this.entitlements.revokeSubscriptionSourced(tx, tenantId, sub.id);
+            }
+            const started = await this.startSubscription(tx, tenantId, {
+                planCode: input.plan_code,
+                status: input.status,
+                billingInterval: input.billing_interval,
+                trialDays: input.trial_days ?? 14,
+                periodEnd: input.current_period_end,
+                autoRenew: input.auto_renew,
+                discountMinor: input.discount_minor,
+                payment: input.payment,
+            }, { ...actor, tenantId });
+            // A downgrade must never switch features off silently.
+            const after = await this.entitlements.compute(tenantId, tx);
+            const lost = before.features.filter((f) => !after.features.includes(f));
+            if (before.accessMode === 'FULL' && lost.length > 0 && !input.confirm) {
+                throw new ConflictError('CONFIRMATION_REQUIRED', 'This change removes features the school uses today. Resend with confirm=true to proceed.', { lost_features: lost });
+            }
+            await recordAudit(tx, actor, {
+                tenantId,
+                action: 'SUBSCRIPTION_CHANGED',
+                entityType: 'subscription',
+                entityId: started.id,
+                before: open.map((s) => ({ id: s.id, status: s.status })),
+                after: { plan_code: input.plan_code, status: input.status },
+                reason: input.reason,
+            });
+            return started;
+        });
+        await this.entitlements.invalidate(tenantId);
+        return {
+            subscription_id: id.id,
+            invoice_id: id.invoiceId,
+            entitlements: presentSnapshot(await this.entitlements.snapshot(tenantId)),
+        };
+    }
+    /**
+     * Cancel the governing subscription. By default access continues until the
+     * end of the paid period; `immediately` ends it now (then the grace period applies).
+     */
+    async cancelSubscription(tenantId, input, actor) {
+        await this.deps.db.transaction(async (tx) => {
+            await tx.select().from(tenants).where(eq(tenants.id, tenantId)).for('update');
+            const [sub] = await tx
+                .select()
+                .from(subscriptions)
+                .where(and(eq(subscriptions.tenantId, tenantId), inArray(subscriptions.status, ['TRIAL', 'ACTIVE', 'PAST_DUE'])))
+                .orderBy(desc(subscriptions.startsAt))
+                .limit(1);
+            if (!sub)
+                throw new BusinessRuleError('INVALID_STATE', 'There is no active subscription to cancel');
+            const now = this.deps.clock.now();
+            await tx
+                .update(subscriptions)
+                .set({
+                status: 'CANCELLED',
+                cancelledAt: now,
+                endedAt: input.immediately ? now : null,
+                autoRenew: false,
+                version: sub.version + 1,
+            })
+                .where(eq(subscriptions.id, sub.id));
+            await recordAudit(tx, actor, {
+                tenantId,
+                action: 'SUBSCRIPTION_CANCELLED',
+                entityType: 'subscription',
+                entityId: sub.id,
+                before: { status: sub.status },
+                after: { status: 'CANCELLED', immediately: input.immediately },
+                reason: input.reason,
+            });
+            await publishEvent(tx, actor, {
+                tenantId,
+                eventType: 'subscription.cancelled',
+                aggregateType: 'subscription',
+                aggregateId: sub.id,
+                payload: { tenant_id: tenantId, subscription_id: sub.id, immediately: input.immediately },
+            });
+        });
+        await this.entitlements.invalidate(tenantId);
+        return { entitlements: presentSnapshot(await this.entitlements.snapshot(tenantId)) };
+    }
+    async startSubscription(tx, tenantId, input, actor) {
+        const now = this.deps.clock.now();
+        const [version] = await tx
+            .select({
+            id: planVersions.id,
+            currency: planVersions.currency,
+            monthly: planVersions.priceMonthlyMinor,
+            annual: planVersions.priceAnnualMinor,
+            planName: plans.name,
+        })
+            .from(planVersions)
+            .innerJoin(plans, eq(plans.id, planVersions.planId))
+            .where(and(eq(plans.code, input.planCode), eq(plans.status, 'ACTIVE'), eq(planVersions.status, 'ACTIVE')))
+            .orderBy(desc(planVersions.version))
+            .limit(1);
+        if (!version)
+            throw new NotFoundError('Plan', { plan_code: input.planCode });
+        const periodEnd = input.status === 'TRIAL'
+            ? addDays(now, input.trialDays)
+            : (input.periodEnd ?? addDays(now, input.billingInterval === 'MONTHLY' ? 30 : 365));
+        if (periodEnd <= now)
+            throw new BusinessRuleError('OPERATION_NOT_ALLOWED', 'The subscription period must end in the future');
+        const [row] = await tx
+            .insert(subscriptions)
+            .values({
+            tenantId,
+            planVersionId: version.id,
+            status: input.status,
+            currency: version.currency,
+            billingInterval: input.billingInterval,
+            startsAt: now,
+            trialEndsAt: input.status === 'TRIAL' ? periodEnd : null,
+            currentPeriodStart: now,
+            currentPeriodEnd: periodEnd,
+            autoRenew: input.autoRenew,
+            createdBy: actor.userId,
+        })
+            .$returningId();
+        const price = input.status === 'TRIAL'
+            ? 0
+            : input.billingInterval === 'MONTHLY'
+                ? version.monthly
+                : version.annual;
+        const discount = input.discountMinor ?? 0;
+        if (input.status === 'TRIAL' && (discount > 0 || input.payment))
+            throw new ValidationError('A trial has nothing to pay. Start a paid subscription instead.');
+        if (discount > 0 && discount >= price)
+            throw new ValidationError('The discount must be smaller than the price');
+        await tx.insert(subscriptionItems).values({
+            subscriptionId: row.id,
+            tenantId,
+            itemType: 'PLAN',
+            currency: version.currency,
+            standardPriceMinor: price,
+            discountMinor: discount,
+            finalPriceMinor: price - discount,
+            startsAt: now,
+            endsAt: periodEnd,
+        });
+        await this.entitlements.materializePlan(tx, tenantId, row.id, version.id, actor);
+        await publishEvent(tx, actor, {
+            tenantId,
+            eventType: 'subscription.started',
+            aggregateType: 'subscription',
+            aggregateId: row.id,
+            payload: {
+                tenant_id: tenantId,
+                subscription_id: row.id,
+                plan_code: input.planCode,
+                status: input.status,
+            },
+        });
+        // A paid subscription is invoiced straight away; any payment already received is recorded with it.
+        let invoiceId = null;
+        if (input.status === 'ACTIVE' && price > 0) {
+            const interval = { MONTHLY: 'monthly', ANNUAL: 'annual', CUSTOM: 'custom-term' }[input.billingInterval];
+            const invoice = await this.billing.createInvoice(tx, actor, {
+                tenantId,
+                subscriptionId: row.id,
+                description: `${version.planName} plan, ${interval} subscription`,
+                planName: version.planName,
+                currency: version.currency,
+                subtotalMinor: price,
+                discountMinor: discount,
+                periodStart: now,
+                periodEnd,
+            });
+            invoiceId = invoice.id;
+            if (input.payment)
+                await this.billing.recordPaymentTx(tx, actor, invoice.id, input.payment);
+        }
+        else if (input.payment) {
+            throw new ValidationError('There is no invoice to record this payment against');
+        }
+        return { id: row.id, invoiceId };
+    }
+    async subscriptions(tenantId) {
+        await this.getRow(tenantId);
+        const rows = await this.deps.db
+            .select({
+            s: subscriptions,
+            planCode: plans.code,
+            planName: plans.name,
+            planVersion: planVersions.version,
+        })
+            .from(subscriptions)
+            .innerJoin(planVersions, eq(planVersions.id, subscriptions.planVersionId))
+            .innerJoin(plans, eq(plans.id, planVersions.planId))
+            .where(eq(subscriptions.tenantId, tenantId))
+            .orderBy(desc(subscriptions.startsAt));
+        return rows.map(({ s, planCode, planName, planVersion }) => ({
+            id: s.id,
+            plan: { code: planCode, name: planName, version: planVersion },
+            status: s.status,
+            currency: s.currency,
+            billing_interval: s.billingInterval,
+            starts_at: s.startsAt.toISOString(),
+            trial_ends_at: s.trialEndsAt?.toISOString() ?? null,
+            current_period_start: s.currentPeriodStart.toISOString(),
+            current_period_end: s.currentPeriodEnd.toISOString(),
+            cancelled_at: s.cancelledAt?.toISOString() ?? null,
+            ended_at: s.endedAt?.toISOString() ?? null,
+            auto_renew: s.autoRenew,
+        }));
+    }
+    // ---------------------------------------------------------------------------
+    // School requests (public onboarding form)
+    // ---------------------------------------------------------------------------
+    async submitRequest(input, actor) {
+        return this.deps.db.transaction(async (tx) => {
+            const [row] = await tx
+                .insert(schoolRequests)
+                .values({
+                schoolName: input.school_name,
+                contactName: input.contact_name,
+                contactEmail: input.contact_email.toLowerCase(),
+                contactPhone: input.contact_phone ?? null,
+                city: input.city ?? null,
+                country: input.country ?? null,
+                message: input.message ?? null,
+            })
+                .$returningId();
+            await recordAudit(tx, actor, {
+                tenantId: null,
+                action: 'SCHOOL_REQUEST_SUBMITTED',
+                entityType: 'school_request',
+                entityId: row.id,
+                after: { school_name: input.school_name, contact_email: input.contact_email },
+            });
+            await publishEvent(tx, actor, {
+                tenantId: null,
+                eventType: 'school_request.submitted',
+                aggregateType: 'school_request',
+                aggregateId: row.id,
+                payload: { school_request_id: row.id },
+            });
+            return { id: row.id, status: 'PENDING' };
+        });
+    }
+    async listRequests(q) {
+        const where = q.status ? eq(schoolRequests.status, q.status) : undefined;
+        const [rows, [total]] = await Promise.all([
+            this.deps.db
+                .select()
+                .from(schoolRequests)
+                .where(where)
+                .orderBy(orderFrom(q, { created_at: schoolRequests.createdAt, school_name: schoolRequests.schoolName }, 'created_at'))
+                .limit(q.page_size)
+                .offset(offsetOf(q)),
+            this.deps.db.select({ n: count() }).from(schoolRequests).where(where),
+        ]);
+        return pageOf(rows.map((r) => ({
+            id: r.id,
+            school_name: r.schoolName,
+            contact_name: r.contactName,
+            contact_email: r.contactEmail,
+            contact_phone: r.contactPhone,
+            city: r.city,
+            country: r.country,
+            message: r.message,
+            status: r.status,
+            review_note: r.reviewNote,
+            reviewed_at: r.reviewedAt?.toISOString() ?? null,
+            tenant_id: r.tenantId,
+            created_at: r.createdAt.toISOString(),
+        })), total?.n ?? 0, q);
+    }
+    async reviewRequest(requestId, decision, actor) {
+        return this.deps.db.transaction(async (tx) => {
+            const [req] = await tx
+                .select()
+                .from(schoolRequests)
+                .where(eq(schoolRequests.id, requestId))
+                .for('update');
+            if (!req)
+                throw new NotFoundError('School request');
+            if (req.status !== 'PENDING' && req.status !== 'UNDER_REVIEW')
+                throw new BusinessRuleError('INVALID_STATE', `This request was already ${req.status.toLowerCase()}`);
+            const now = this.deps.clock.now();
+            if (!decision.approve) {
+                await tx
+                    .update(schoolRequests)
+                    .set({
+                    status: 'REJECTED',
+                    reviewNote: decision.note,
+                    reviewedBy: actor.userId,
+                    reviewedAt: now,
+                })
+                    .where(eq(schoolRequests.id, requestId));
+                await recordAudit(tx, actor, {
+                    tenantId: null,
+                    action: 'SCHOOL_REQUEST_REJECTED',
+                    entityType: 'school_request',
+                    entityId: requestId,
+                    reason: decision.note,
+                });
+                return { id: requestId, status: 'REJECTED', tenant_id: null };
+            }
+            let tenantId;
+            try {
+                tenantId = await this.create(decision.tenant, actor, {
+                    schoolRequestId: requestId,
+                    executor: tx,
+                });
+            }
+            catch (err) {
+                if (isDuplicateKeyError(err))
+                    throw new ConflictError('DUPLICATE_RESOURCE', 'A school with this code already exists', {
+                        field: 'code',
+                    });
+                throw err;
+            }
+            await tx
+                .update(schoolRequests)
+                .set({ status: 'APPROVED', tenantId, reviewedBy: actor.userId, reviewedAt: now })
+                .where(eq(schoolRequests.id, requestId));
+            await recordAudit(tx, actor, {
+                tenantId,
+                action: 'SCHOOL_REQUEST_APPROVED',
+                entityType: 'school_request',
+                entityId: requestId,
+            });
+            return { id: requestId, status: 'APPROVED', tenant_id: tenantId };
+        });
+    }
+}

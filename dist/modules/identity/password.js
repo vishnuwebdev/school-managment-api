@@ -1,0 +1,25 @@
+import argon2 from 'argon2';
+import { z } from 'zod';
+/** Password policy shared by every endpoint that sets a password. */
+export const PasswordSchema = z
+    .string()
+    .min(6, 'Password must be at least 6 characters')
+    .max(128, 'Password must be at most 128 characters')
+    .refine((v) => /[A-Za-z]/.test(v) && /\d/.test(v), 'Password must contain letters and numbers');
+export function hashPassword(plain) {
+    return argon2.hash(plain, { type: argon2.argon2id });
+}
+export async function verifyPassword(hash, plain) {
+    try {
+        return await argon2.verify(hash, plain);
+    }
+    catch {
+        return false;
+    }
+}
+// Used to keep login timing constant when the email does not exist.
+let dummyHash = null;
+export function dummyVerify(plain) {
+    dummyHash ??= hashPassword('dummy-password-for-timing-1');
+    return dummyHash.then((h) => verifyPassword(h, plain)).then(() => false);
+}
