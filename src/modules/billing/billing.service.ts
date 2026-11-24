@@ -345,7 +345,7 @@ export class BillingService {
   }
 
   /** Brings `paid_minor` and the status back in line with the RECEIVED payments. */
-  private async settle(tx: Executor, invoiceId: string): Promise<'OPEN' | 'PAID'> {
+  async settle(tx: Executor, invoiceId: string): Promise<'OPEN' | 'PAID'> {
     const [sum] = await tx
       .select({ total: sql<string>`COALESCE(SUM(${subscriptionPayments.amountMinor}), 0)` })
       .from(subscriptionPayments)
@@ -777,7 +777,7 @@ export class BillingService {
   // PDFs. `tenantId` limits the lookup to one school (school-side routes).
   // ---------------------------------------------------------------------------
 
-  private issuer() {
+  issuer() {
     return {
       name: this.deps.env.BILLING_ISSUER_NAME,
       details: this.deps.env.BILLING_ISSUER_DETAILS.replace(/\\n/g, '\n'),

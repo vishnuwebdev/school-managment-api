@@ -122,7 +122,9 @@ export class StaffImportService {
     try {
       if (contentType.includes('csv')) {
         const { Readable } = await import('node:stream');
-        await wb.csv.read(Readable.from(data));
+        // Keep every CSV cell as text: ExcelJS would turn "2026-01-02" into a local-midnight
+        // date, which on an Indian server (UTC+5:30) reads back as the day before.
+        await wb.csv.read(Readable.from(data), { map: (value: unknown) => value });
       } else {
         await wb.xlsx.load(data as unknown as ArrayBuffer);
       }

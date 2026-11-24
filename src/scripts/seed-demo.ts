@@ -1,4 +1,6 @@
 import 'dotenv/config';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import request from 'supertest';
 import { closeDeps, createDeps } from '../bootstrap.js';
 import { loadEnv } from '../config/env.js';
@@ -27,7 +29,10 @@ const SUPER_PASSWORD = process.env.SEED_SUPER_ADMIN_PASSWORD ?? 'ChangeMe!12345'
 process.env.LOG_LEVEL = 'error'; // keep the output readable
 const mailer = new MemoryMailer();
 // In-process app only (not the running API): "test" mode lifts the 10/min sign-in limit and silences request logs.
-const deps = createDeps({ env: { ...loadEnv(), NODE_ENV: 'test' }, mailer });
+// The demo is built with the full product model (plans, sub-users), whose code is kept; in simple
+// mode the plans' app features then become the schools' Teacher app / Parent app switches.
+const runEnv = loadEnv();
+const deps = createDeps({ env: { ...runEnv, NODE_ENV: 'test', PRODUCT_MODE: 'full' }, mailer });
 const svc = buildServices(deps);
 const http = request(createApp(deps, svc));
 
@@ -799,6 +804,8 @@ async function seedTeachers() {
       if (p.then === 'start-leave')
         await ok('post', `/teachers/${teacher.id}/start-leave`, token, {
           reason: 'Demo: extended medical leave',
+          // A two-week leave, so it covers school days even when the seed runs on a Sunday.
+          leave_end_date: new Date(Date.now() + 14 * 86_400_000).toISOString().slice(0, 10),
         });
       if (p.then === 'resign')
         await ok('post', `/teachers/${teacher.id}/resign`, token, {
@@ -1284,12 +1291,27 @@ function hash(s: string) {
   return h;
 }
 
+/**
+ * Simple product mode: switch the Teacher app / Parent app on for each demo school whose plan
+ * included it (the same rule as migration 0049).
+ */
+async function keepPlanApps() {
+  if (runEnv.PRODUCT_MODE === 'full') return;
+  const sql = readFileSync(
+    fileURLToPath(new URL('../../drizzle/0049_school_app_switches.sql', import.meta.url)),
+    'utf8',
+  );
+  await deps.pool.query(sql.replace(/^--.*$/gm, ''));
+  created.push('Teacher app / Parent app switched on where the demo plan included them');
+}
+
 main()
   .then(() => seedAcademics())
   .then(() => seedTeachers())
   .then(() => seedAttendance())
   .then(() => seedTimetable())
   .then(() => seedExams())
+  .then(() => keepPlanApps())
   .then(async () => {
     console.log('\nDemo data ready.');
     for (const c of created) console.log('  + ' + c);

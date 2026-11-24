@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "0c0e703d-0a08-4252-9448-c4c6cc4b76d1",
+  "status": "current",
+  "command": "deliver",
+  "type": "architecture",
+  "input": "/Users/vishnusharma/Projects/multi-tenant/Admin Panel/api/.archify/architecture-api-20261124-135719/candidate.json",
+  "output": "/Users/vishnusharma/Projects/multi-tenant/Admin Panel/api/.archify/architecture-api-20261124-135719/edusphere-api.html",
+  "specification": {
+    "sha256": "cb7c02fd2785e9bf0af1bc41c67e311d785db1236d660739ed89a3ac1ddfa18c",
+    "bytes": 9548
+  },
+  "artifact": {
+    "sha256": "5623f2a7804cb402910116d96de756a0be732a80800739b082928c067361e64d",
+    "bytes": 961145
+  }
+}

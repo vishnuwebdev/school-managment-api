@@ -23,6 +23,7 @@ import { studentRoutes } from "./modules/students/students.routes.js";
 import { teacherRoutes } from "./modules/teachers/teachers.routes.js";
 import { auditRoutes } from "./modules/audit/audit.routes.js";
 import { billingRoutes } from "./modules/billing/billing.routes.js";
+import { schoolPaymentRoutes } from "./modules/school-payments/school-payments.routes.js";
 import { planRoutes } from "./modules/plans/plans.routes.js";
 import { catalogRoutes } from "./modules/catalog/catalog.routes.js";
 import { authRoutes } from "./modules/identity/auth.routes.js";
@@ -155,6 +156,7 @@ export function createApp(
       ...catalogRoutes(deps, svc.entitlements),
       ...planRoutes(svc.plans),
       ...billingRoutes(svc.billing),
+      ...schoolPaymentRoutes(svc.schoolPayments),
       ...auditRoutes(deps),
       ...classOverviewRoutes(svc.classOverview),
       ...academicRoutes(svc.academic),

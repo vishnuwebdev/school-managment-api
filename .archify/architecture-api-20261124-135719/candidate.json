@@ -1,0 +1,179 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "EduSphere API: how it works",
+    "output": ".archify/architecture-api-20261124-135719/edusphere-api.html",
+    "quality_profile": "showcase",
+    "locale": "en",
+    "repository": {
+      "url": "git@github.com:vishnuwebdev/school-managment-api.git",
+      "provider": "github",
+      "link_mode": "local-only",
+      "revision": "baf391b1058e5dfa2afa6f32a8513a238957aa34"
+    }
+  },
+  "layout": { "mode": "auto" },
+  "components": [
+    {
+      "id": "clients",
+      "type": "external",
+      "label": "Admin panel + mobile apps",
+      "sublabel": "Flutter web, teacher, parent",
+      "explanation": "All three apps call the same API under /api/v1. Teacher app routes live under /teacher/*, parent app routes under /parent/*, everything else is used by the admin panel.",
+      "sources": [
+        { "path": "src/modules/teacher-app/teacher-app.routes.ts", "line": 117, "end_line": 117, "label": "/teacher/me" },
+        { "path": "src/modules/parent-app/parent-app.routes.ts", "line": 63, "end_line": 63, "label": "/parent/me" }
+      ]
+    },
+    {
+      "id": "express",
+      "type": "backend",
+      "label": "Express app",
+      "sublabel": "helmet, CORS, JSON + file bodies",
+      "explanation": "createApp() sets security headers, CORS from CORS_ORIGINS, a request id, JSON bodies (1 MB) and raw file bodies (6 MB) for photos, documents and imports, then mounts every module's routes under /api/v1.",
+      "sources": [
+        { "path": "src/app.ts", "line": 82, "end_line": 98, "label": "middleware" },
+        { "path": "src/app.ts", "line": 145, "end_line": 145, "label": "pipeline" },
+        { "path": "src/app.ts", "line": 255, "end_line": 259, "label": "mount /api/v1" }
+      ]
+    },
+    {
+      "id": "signin",
+      "type": "security",
+      "label": "Sign-in",
+      "sublabel": "email or mobile + password",
+      "tag": "rate limited",
+      "explanation": "POST /auth/login checks the password (argon2), creates a session row and returns a signed JWT access token carrying user, session and membership ids. Public route, limited to 10 attempts a minute.",
+      "sources": [
+        { "path": "src/modules/identity/auth.routes.ts", "line": 38, "end_line": 60 },
+        { "path": "src/modules/identity/auth.service.ts", "line": 310, "end_line": 322, "label": "session + token" }
+      ]
+    },
+    {
+      "id": "pipeline",
+      "type": "security",
+      "label": "Request pipeline",
+      "sublabel": "who, which school, allowed?",
+      "explanation": "Every non-public route runs: authenticate (token + live session + active user and membership), resolve the school from the membership (never the request body), check school status and subscription, then check the route's permission and the school's plan features.",
+      "sources": [
+        { "path": "src/http/route.ts", "line": 84, "end_line": 91, "label": "chain order" },
+        { "path": "src/http/pipeline.ts", "line": 52, "end_line": 97, "label": "authenticate" },
+        { "path": "src/http/pipeline.ts", "line": 199, "end_line": 257, "label": "school + permission" }
+      ]
+    },
+    {
+      "id": "modules",
+      "type": "backend",
+      "label": "Feature modules",
+      "sublabel": "students, fees, exams, attendance…",
+      "explanation": "About 24 folders under src/modules, each with routes (zod-validated), a service and schemas. Services run SQL in a transaction and call recordChange for every business change.",
+      "sources": [
+        { "path": "src/modules/students/students.service.ts", "line": 550, "end_line": 552, "label": "transaction" },
+        { "path": "src/http/route.ts", "line": 92, "end_line": 101, "label": "validate + handler" }
+      ]
+    },
+    {
+      "id": "recorder",
+      "type": "backend",
+      "label": "Change recorder",
+      "sublabel": "audit row + outbox event",
+      "explanation": "recordChange writes the audit row and, when the change has an event, an outbox_events row, using the same transaction as the business change. All three commit or none do.",
+      "sources": [
+        { "path": "src/platform/record.ts", "line": 25, "end_line": 49 },
+        { "path": "src/platform/outbox.ts", "line": 20, "end_line": 42 }
+      ]
+    },
+    {
+      "id": "inline",
+      "type": "backend",
+      "label": "In-API outbox relay",
+      "sublabel": "only when REDIS_URL is not set",
+      "explanation": "Without Redis there is no worker: the API process itself polls pending outbox rows and runs their handlers.",
+      "sources": [
+        { "path": "src/server.ts", "line": 6, "end_line": 8 },
+        { "path": "src/events/inline-relay.ts", "line": 13, "end_line": 31 }
+      ]
+    },
+    {
+      "id": "mysql",
+      "type": "database",
+      "label": "MySQL",
+      "sublabel": "Drizzle ORM, all schools' data",
+      "explanation": "One database for every school. Tenant tables carry tenant_id; the school id always comes from the signed-in membership. Migrations live in drizzle/.",
+      "sources": [
+        { "path": "src/db/client.ts", "line": 11, "end_line": 21 }
+      ]
+    },
+    {
+      "id": "files",
+      "type": "database",
+      "label": "Local file storage",
+      "sublabel": "photos, documents, logos",
+      "tag": "S3 not built",
+      "sources": [
+        { "path": "src/infrastructure/storage/storage.ts", "line": 17, "end_line": 28 },
+        { "path": "src/infrastructure/storage/storage.ts", "line": 67, "end_line": 71, "label": "driver choice" }
+      ]
+    },
+    {
+      "id": "redis",
+      "type": "database",
+      "label": "Redis (optional)",
+      "sublabel": "entitlements cache + job queue",
+      "sources": [
+        { "path": "src/bootstrap.ts", "line": 20, "end_line": 23 },
+        { "path": "src/modules/entitlements/entitlements.service.ts", "line": 56, "end_line": 61, "label": "cached plan features" },
+        { "path": "src/infrastructure/queue.ts", "line": 16, "end_line": 17 }
+      ]
+    },
+    {
+      "id": "worker",
+      "type": "backend",
+      "label": "Worker",
+      "sublabel": "BullMQ, runs only with Redis",
+      "explanation": "Claims pending outbox rows (FOR UPDATE SKIP LOCKED), puts them on the BullMQ events queue, and runs each event's handlers once per handler (consumption ledger). Failed relays retry with back-off, up to 10 times.",
+      "sources": [
+        { "path": "src/worker.ts", "line": 24, "end_line": 53 },
+        { "path": "src/events/processor.ts", "line": 14, "end_line": 76 }
+      ]
+    },
+    {
+      "id": "mailer",
+      "type": "external",
+      "label": "Email (console only)",
+      "sublabel": "invites, password resets",
+      "tag": "no real provider",
+      "sources": [
+        { "path": "src/events/handlers.ts", "line": 96, "end_line": 98, "label": "event → handler" },
+        { "path": "src/infrastructure/mail/mailer.ts", "line": 22, "end_line": 22, "label": "ConsoleMailer" }
+      ]
+    }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "API process (server.ts)", "wraps": ["express", "signin", "pipeline", "modules", "recorder", "inline"] }
+  ],
+  "connections": [
+    { "id": "c-clients", "from": "clients", "to": "express", "label": "HTTPS /api/v1", "variant": "emphasis" },
+    { "id": "c-login", "from": "express", "to": "signin", "label": "public login" },
+    { "id": "c-guard", "from": "express", "to": "pipeline", "label": "Bearer token", "variant": "emphasis" },
+    { "id": "c-allowed", "from": "pipeline", "to": "modules", "label": "allowed request", "variant": "emphasis" },
+    { "id": "c-record", "from": "modules", "to": "recorder", "label": "same transaction" },
+    { "id": "c-sql", "from": "modules", "to": "mysql", "label": "SQL" },
+    { "id": "c-outbox", "from": "recorder", "to": "mysql", "label": "audit + outbox rows" },
+    { "id": "c-files", "from": "modules", "to": "files", "label": "save / read files" },
+    { "id": "c-session", "from": "pipeline", "to": "mysql", "label": "check session", "variant": "security" },
+    { "id": "c-signin-db", "from": "signin", "to": "mysql", "label": "new session", "variant": "security" },
+    { "id": "c-cache", "from": "pipeline", "to": "redis", "label": "plan features", "variant": "dashed" },
+    { "id": "c-claim", "from": "worker", "to": "mysql", "label": "claim pending events", "variant": "dashed" },
+    { "id": "c-queue", "from": "worker", "to": "redis", "label": "BullMQ jobs", "variant": "dashed" },
+    { "id": "c-mail", "from": "worker", "to": "mailer", "label": "send email", "variant": "dashed" },
+    { "id": "c-inline-db", "from": "inline", "to": "mysql", "label": "poll outbox", "variant": "dashed" },
+    { "id": "c-inline-mail", "from": "inline", "to": "mailer", "label": "send email", "variant": "dashed" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "One request, step by step", "items": ["Express parses the body", "Pipeline: token → live session → school from membership → permission + plan feature", "Module validates input (zod) and runs its service", "Change, audit row and outbox event commit together"] },
+    { "dot": "rose", "title": "Rules the code enforces", "items": ["The school never comes from the request body", "Every school route must declare a permission (checked at startup)", "Platform staff enter a school only with X-Tenant-Id + support access"] },
+    { "dot": "amber", "title": "Not production-ready yet", "items": ["Email prints to the console", "Files go to local disk (S3 driver throws)", "Without Redis: no cache, no worker; the API sends events itself"] }
+  ]
+}

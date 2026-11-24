@@ -2,13 +2,16 @@ import { PDFDocument, rgb, StandardFonts } from 'pdf-lib';
 import { paymentMethodLabel } from '../../shared/payment-methods.js';
 import { drawCentered, safe, wrap } from '../students/certificates.pdf.js';
 
-/** 1234500 minor units → "12,345.00". */
-export function formatMinor(minor: number): string {
+/** 1234500 minor units → "12,345.00"; for INR, Indian grouping: 10000000 → "1,00,000.00". */
+export function formatMinor(minor: number, currency?: string): string {
   const sign = minor < 0 ? '-' : '';
   const abs = Math.abs(minor);
-  const whole = Math.floor(abs / 100)
-    .toString()
-    .replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  const digits = Math.floor(abs / 100).toString();
+  let whole: string;
+  if (currency === 'INR' && digits.length > 3) {
+    const head = digits.slice(0, -3).replace(/\B(?=(\d{2})+(?!\d))/g, ',');
+    whole = `${head},${digits.slice(-3)}`;
+  } else whole = digits.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
   return `${sign}${whole}.${String(abs % 100).padStart(2, '0')}`;
 }
 
@@ -49,6 +52,11 @@ export interface InvoicePdfInput {
     amount_minor: number;
     reversed: boolean;
   }[];
+  /** Yearly school fee: the agreed instalments and where each one stands. */
+  instalments?: { due_on: string; amount_minor: number; status: string }[];
+  /** Line under the description, e.g. "Session 2026-27". Replaces the service period line. */
+  period_label?: string | null;
+  discount_reason?: string | null;
 }
 
 /** A4 invoice for a school's subscription. */
@@ -60,7 +68,7 @@ export async function renderInvoice(o: InvoicePdfInput): Promise<Buffer> {
   const left = 44;
   const right = 595 - 44;
   let y = 790;
-  const money = (n: number) => `${o.currency} ${formatMinor(n)}`;
+  const money = (n: number) => `${o.currency} ${formatMinor(n, o.currency)}`;
   const putRight = (text: string, yy: number, size = 10, font = regular, color = ink) => {
     const t = safe(font, text);
     page.drawText(t, { x: right - font.widthOfTextAtSize(t, size), y: yy, size, font, color });
@@ -127,7 +135,16 @@ export async function renderInvoice(o: InvoicePdfInput): Promise<Buffer> {
   );
   putRight(money(o.subtotal_minor), y);
   y -= Math.max(1, lines.length) * 13;
-  if (o.period_start && o.period_end) {
+  if (o.period_label) {
+    page.drawText(safe(regular, o.period_label), {
+      x: left + 8,
+      y,
+      size: 9,
+      font: regular,
+      color: muted,
+    });
+    y -= 13;
+  } else if (o.period_start && o.period_end) {
     page.drawText(`Service period: ${day(o.period_start)} to ${day(o.period_end)}`, {
       x: left + 8,
       y,
@@ -147,6 +164,13 @@ export async function renderInvoice(o: InvoicePdfInput): Promise<Buffer> {
   };
   total('Subtotal', money(o.subtotal_minor));
   if (o.discount_minor > 0) total('Discount', `- ${money(o.discount_minor)}`);
+  if (o.discount_minor > 0 && o.discount_reason) {
+    for (const l of wrap(regular, `Discount: ${o.discount_reason}`, 8.5, 170)) {
+      page.drawText(l, { x: 360, y: y + 4, size: 8.5, font: regular, color: muted });
+      y -= 11;
+    }
+    y -= 4;
+  }
   total('Total', money(o.total_minor), bold, 11);
   total('Paid', money(o.paid_minor));
   total(
@@ -156,6 +180,21 @@ export async function renderInvoice(o: InvoicePdfInput): Promise<Buffer> {
     12,
     o.status === 'OPEN' ? red : green,
   );
+
+  // Payment schedule (yearly school fee)
+  if (o.instalments && o.instalments.length > 0) {
+    y -= 12;
+    page.drawText('Payment schedule', { x: left, y, size: 10.5, font: bold, color: brand });
+    y -= 8;
+    page.drawLine({ start: { x: left, y }, end: { x: right, y }, thickness: 0.5, color: muted });
+    y -= 14;
+    o.instalments.forEach((it, i) => {
+      page.drawText(`${i + 1}.  Due ${it.due_on}`, { x: left, y, size: 9.5, font: regular, color: ink });
+      page.drawText(safe(regular, it.status), { x: 250, y, size: 9.5, font: regular, color: muted });
+      putRight(money(it.amount_minor), y, 9.5);
+      y -= 14;
+    });
+  }
 
   // Payments
   y -= 12;
@@ -173,7 +212,9 @@ export async function renderInvoice(o: InvoicePdfInput): Promise<Buffer> {
     });
     y -= 14;
   }
-  for (const p of o.payments.slice(0, 14)) {
+  const room = Math.max(1, Math.floor((y - 80) / 14));
+  const shown = o.payments.length > room ? o.payments.slice(0, room - 1) : o.payments;
+  for (const p of shown) {
     const label = `${p.receipt_number}   ${day(p.received_at)}   ${paymentMethodLabel(p.method)}${p.reference ? `   Ref ${p.reference}` : ''}${p.reversed ? '   (reversed)' : ''}`;
     page.drawText(safe(regular, label).slice(0, 95), {
       x: left,
@@ -183,6 +224,16 @@ export async function renderInvoice(o: InvoicePdfInput): Promise<Buffer> {
       color: p.reversed ? muted : ink,
     });
     putRight(money(p.amount_minor), y, 9.5, regular, p.reversed ? muted : ink);
+    y -= 14;
+  }
+  if (shown.length < o.payments.length) {
+    page.drawText(`… and ${o.payments.length - shown.length} more payment(s)`, {
+      x: left,
+      y,
+      size: 9,
+      font: regular,
+      color: muted,
+    });
     y -= 14;
   }
 
@@ -217,6 +268,8 @@ export interface ReceiptPdfInput {
   invoice_total_minor: number;
   invoice_paid_minor: number;
   received_from: string;
+  /** e.g. "Platform fee 2026-27" */
+  for_label?: string | null;
   notes: string | null;
 }
 
@@ -260,10 +313,11 @@ export async function renderPaymentReceipt(o: ReceiptPdfInput): Promise<Buffer> 
   row('Method', paymentMethodLabel(o.method));
   if (o.reference) row('Reference', o.reference);
   row('For invoice', o.invoice_number);
+  if (o.for_label) row('For', o.for_label);
   y -= 6;
   page.drawLine({ start: { x: left, y }, end: { x: right, y }, thickness: 1, color: ink });
   y -= 22;
-  const amt = safe(bold, `${o.currency} ${formatMinor(o.amount_minor)}`);
+  const amt = safe(bold, `${o.currency} ${formatMinor(o.amount_minor, o.currency)}`);
   page.drawText('Amount received', { x: left, y, size: 12, font: bold, color: ink });
   page.drawText(amt, {
     x: right - bold.widthOfTextAtSize(amt, 12),
@@ -274,7 +328,7 @@ export async function renderPaymentReceipt(o: ReceiptPdfInput): Promise<Buffer> 
   });
   y -= 24;
   const bal = Math.max(0, o.invoice_total_minor - o.invoice_paid_minor);
-  const balText = safe(regular, `${o.currency} ${formatMinor(bal)}`);
+  const balText = safe(regular, `${o.currency} ${formatMinor(bal, o.currency)}`);
   page.drawText('Invoice balance after this payment', {
     x: left,
     y,

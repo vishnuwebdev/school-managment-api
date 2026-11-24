@@ -1,14 +1,22 @@
 import {
   bigint,
   char,
+  date,
   index,
+  int,
+  json,
   mysqlEnum,
   mysqlTable,
   uniqueIndex,
   varchar,
 } from 'drizzle-orm/mysql-core';
 import { createdAt, dt, id, ref, updatedAt } from './_columns.js';
-import { BILLING_PAYMENT_METHOD, BILLING_PAYMENT_STATUS, INVOICE_STATUS } from './enums.js';
+import {
+  BILLING_PAYMENT_METHOD,
+  BILLING_PAYMENT_STATUS,
+  INVOICE_KIND,
+  INVOICE_STATUS,
+} from './enums.js';
 import { subscriptions } from './commercial.js';
 import { tenants } from './tenancy.js';
 
@@ -32,6 +40,9 @@ export const subscriptionInvoices = mysqlTable(
       .references(() => tenants.id),
     subscriptionId: ref('subscription_id').references(() => subscriptions.id),
     invoiceNumber: varchar('invoice_number', { length: 32 }).notNull(),
+    kind: mysqlEnum('kind', INVOICE_KIND).notNull().default('SUBSCRIPTION'),
+    /** SESSION_FEE only: the Indian financial year billed, e.g. `2026-27` (1 Apr – 31 Mar). */
+    session: varchar('session', { length: 7 }),
     status: mysqlEnum('status', INVOICE_STATUS).notNull().default('OPEN'),
     currency: char('currency', { length: 3 }).notNull(),
     description: varchar('description', { length: 300 }).notNull(),
@@ -43,6 +54,7 @@ export const subscriptionInvoices = mysqlTable(
     dueAt: dt('due_at').notNull(),
     subtotalMinor: bigint('subtotal_minor', { mode: 'number' }).notNull(),
     discountMinor: bigint('discount_minor', { mode: 'number' }).notNull().default(0),
+    discountReason: varchar('discount_reason', { length: 300 }),
     totalMinor: bigint('total_minor', { mode: 'number' }).notNull(),
     paidMinor: bigint('paid_minor', { mode: 'number' }).notNull().default(0),
     paidAt: dt('paid_at'),
@@ -56,6 +68,7 @@ export const subscriptionInvoices = mysqlTable(
     uniqueIndex('subscription_invoices_number_uq').on(t.invoiceNumber),
     index('subscription_invoices_tenant_idx').on(t.tenantId, t.issuedAt),
     index('subscription_invoices_subscription_idx').on(t.subscriptionId),
+    index('subscription_invoices_session_idx').on(t.kind, t.session),
   ],
 );
 
@@ -89,3 +102,30 @@ export const subscriptionPayments = mysqlTable(
     index('subscription_payments_tenant_idx').on(t.tenantId, t.receivedAt),
   ],
 );
+
+/**
+ * The agreed instalments of a SESSION_FEE invoice (they add up to its total). What has been
+ * paid towards each one is worked out from the payments, oldest first, so it is never stored.
+ */
+export const billingInstalments = mysqlTable(
+  'billing_instalments',
+  {
+    id: id(),
+    invoiceId: ref('invoice_id')
+      .notNull()
+      .references(() => subscriptionInvoices.id),
+    seq: int('seq').notNull(),
+    amountMinor: bigint('amount_minor', { mode: 'number' }).notNull(),
+    dueDate: date('due_date', { mode: 'string' }).notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [uniqueIndex('billing_instalments_invoice_seq_uq').on(t.invoiceId, t.seq)],
+);
+
+/** Platform-wide settings the Super Admin can change (e.g. the default yearly school fee). */
+export const platformSettings = mysqlTable('platform_settings', {
+  settingKey: varchar('setting_key', { length: 100 }).primaryKey(),
+  value: json('value').notNull(),
+  updatedBy: ref('updated_by'),
+  updatedAt: updatedAt(),
+});
