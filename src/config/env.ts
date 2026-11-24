@@ -5,7 +5,17 @@ const bool = z.enum(['true', 'false', '1', '0']).transform((v) => v === 'true' |
 
 const EnvSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
-  PORT: z.coerce.number().int().positive().default(4000),
+  /**
+   * A port number, or a socket/pipe path: some managed Node hosts (e.g. LiteSpeed-based ones
+   * such as Hostinger) pass a path instead of a number. Numbers listen on HOST.
+   */
+  PORT: z
+    .string()
+    .trim()
+    .default('4000')
+    .transform((v) => (/^\d+$/.test(v) ? Number(v) : v)),
+  /** Address to listen on for a numeric PORT. 0.0.0.0 = every network interface. */
+  HOST: z.string().trim().default('0.0.0.0'),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
   CORS_ORIGINS: z.string().default(''),
   TRUST_PROXY: bool.default(false),
