@@ -64,14 +64,16 @@ describe('authentication', () => {
       .post('/api/v1/auth/refresh')
       .send({ refresh_token: s.refresh_token });
     expect(code(replay)).toBe('INVALID_TOKEN');
-    expect(code(await h.as(r1.body.data.access_token).get('/auth/me'))).toBe('INVALID_TOKEN');
+    expect(code(await h.as(r1.body.data.access_token).get('/auth/me'))).toBe(
+      'SIGNED_OUT_ELSEWHERE',
+    );
     expect(
       code(
         await h.http
           .post('/api/v1/auth/refresh')
           .send({ refresh_token: r1.body.data.refresh_token }),
       ),
-    ).toBe('INVALID_TOKEN');
+    ).toBe('SIGNED_OUT_ELSEWHERE');
   });
 
   it('logout ends the session immediately', async () => {
@@ -88,7 +90,7 @@ describe('authentication', () => {
     const ids = list.body.data.map((x: { id: string }) => x.id);
     expect(ids).toEqual(expect.arrayContaining([a.session_id, b.session_id]));
     expect((await h.as(a.access_token).delete(`/auth/sessions/${b.session_id}`)).status).toBe(204);
-    expect(code(await h.as(b.access_token).get('/auth/me'))).toBe('INVALID_TOKEN');
+    expect(code(await h.as(b.access_token).get('/auth/me'))).toBe('SIGNED_OUT_ELSEWHERE');
   });
 
   it('resets a password by email link and signs out every session', async () => {
@@ -110,7 +112,7 @@ describe('authentication', () => {
       .post('/api/v1/auth/reset-password')
       .send({ token, new_password: 'BrandNewPass99' });
     expect(ok.status).toBe(204);
-    expect(code(await admin.api.get('/auth/me'))).toBe('INVALID_TOKEN');
+    expect(code(await admin.api.get('/auth/me'))).toBe('SIGNED_OUT_ELSEWHERE');
     expect(
       code(
         await h.http
@@ -130,7 +132,7 @@ describe('authentication', () => {
     });
     expect(res.status).toBe(204);
     expect((await admin.api.get('/auth/me')).status).toBe(200);
-    expect(code(await h.as(other.access_token).get('/auth/me'))).toBe('INVALID_TOKEN');
+    expect(code(await h.as(other.access_token).get('/auth/me'))).toBe('SIGNED_OUT_ELSEWHERE');
   });
 
   it('asks users with several schools to choose, and can switch context', async () => {

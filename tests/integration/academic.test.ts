@@ -204,6 +204,62 @@ describe('classes, sections and subjects', () => {
     );
     expect((await api.post(`/subject-offerings/${wide.body.data.id}/activate`)).status).toBe(422);
   });
+  it('limits a subject to class phases: lists, filters and offerings follow', async () => {
+    const early = (
+      await api.post('/academic-classes', { code: 'lkg', name: 'LKG', phase: 'EARLY_YEARS' })
+    ).body.data.id;
+    const senior = (
+      await api.post('/academic-classes', { code: 'grade_11', name: 'Grade 11', phase: 'SENIOR' })
+    ).body.data.id;
+    const rhymes = await api.post('/subjects', {
+      code: 'rhymes',
+      name: 'Rhymes',
+      phases: ['EARLY_YEARS', 'EARLY_YEARS'],
+    });
+    expect(rhymes.status).toBe(201);
+    expect(rhymes.body.data.phases).toEqual(['EARLY_YEARS']);
+    const physics = await api.post('/subjects', {
+      code: 'physics',
+      name: 'Physics',
+      phases: ['SENIOR', 'SECONDARY'],
+    });
+    expect(physics.body.data.phases).toEqual(['SECONDARY', 'SENIOR']);
+    const pe = await api.post('/subjects', {
+      code: 'pe',
+      name: 'Physical Education',
+      phases: ['EARLY_YEARS', 'PRIMARY', 'SECONDARY', 'SENIOR'],
+    });
+    expect(pe.body.data.phases).toBeNull(); // every phase
+
+    const codes = async (phase: string) =>
+      (await api.get(`/subjects?phase=${phase}&page_size=100`)).body.data.map(
+        (x: { code: string }) => x.code,
+      );
+    const forEarly = await codes('EARLY_YEARS');
+    expect(forEarly).toEqual(expect.arrayContaining(['RHYMES', 'PE']));
+    expect(forEarly).not.toContain('PHYSICS');
+    expect(await codes('SENIOR')).not.toContain('RHYMES');
+
+    const offer = (subjectId: string, classId: string) =>
+      api.post('/subject-offerings', {
+        academic_year_id: yearId,
+        subject_id: subjectId,
+        class_id: classId,
+      });
+    const refused = await offer(physics.body.data.id, early);
+    expect(refused.status).toBe(422);
+    expect(refused.body.error.details.reason).toBe('SUBJECT_NOT_FOR_PHASE');
+    expect((await offer(physics.body.data.id, senior)).status).toBe(201);
+    expect((await offer(pe.body.data.id, early)).status).toBe(201);
+
+    // Widening the subject to every phase lets it be offered anywhere.
+    const widened = await api.patch(`/subjects/${physics.body.data.id}`, {
+      version: physics.body.data.version,
+      phases: null,
+    });
+    expect(widened.body.data.phases).toBeNull();
+    expect((await offer(physics.body.data.id, early)).status).toBe(201);
+  });
 });
 
 describe('tenant isolation and permissions', () => {
@@ -264,6 +320,7 @@ describe('class order', () => {
 
     // another school's class is treated as missing
     const foreign = (await api.get('/academic-classes?page_size=1')).body.data[0]?.id;
-    if (foreign) expect((await b.post('/academic-classes/reorder', { ids: [foreign] })).status).toBe(404);
+    if (foreign)
+      expect((await b.post('/academic-classes/reorder', { ids: [foreign] })).status).toBe(404);
   });
 });

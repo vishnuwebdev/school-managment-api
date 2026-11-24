@@ -1,64 +1,58 @@
-import { and, asc, desc, eq, inArray, isNotNull, lte, or, gte, isNull, sql } from 'drizzle-orm';
+import { and, eq, inArray, or } from 'drizzle-orm';
 import type { z } from 'zod';
 import type { Deps } from '../../container.js';
 import type { Executor } from '../../db/client.js';
-import {
-  academicYears,
-  teachers,
-  timetableEntries,
-  timetablePeriods,
-  timetables,
-  timetableVenues,
-} from '../../db/schema/index.js';
+import { academicYears, teachers, timetableVenues } from '../../db/schema/index.js';
 import type { Actor, Principal } from '../../platform/context.js';
 import { recordChange } from '../../platform/record.js';
 import { csvLine } from '../../shared/csv.js';
 import { NotFoundError } from '../../shared/errors.js';
 import { fullName } from '../teachers/support.js';
 import type { TimetableConfigService } from './config.service.js';
+import {
+  cellOf,
+  lessonPresent,
+  lessonsOf,
+  loadPeriods,
+  periodBrief,
+  specPresent,
+  type Lesson,
+  type LessonView,
+  type LoadedPeriod,
+} from './lessons.js';
 import type { DayViewQuery, ExportQuery, ViewQuery, WorkloadQuery } from './timetable.schemas.js';
 import {
+  currentYearId,
   DAY_NAMES,
-  entryScope,
-  fetchEntries,
   hhmm,
   isoWeekday,
+  loadClassOwner,
   loadSection,
-  loadTimetable,
-  presentEntry,
+  ownerFilter,
   readSettings,
   requireWide,
-  rows,
   schoolToday,
-  type EntryView,
-  periodsForSection,
-  type PeriodRow,
+  sectionInScope,
+  type Owner,
   type SettingsRow,
-  type TimetableRow,
 } from './support.js';
 
-const brief = (t: TimetableRow) => ({
-  id: t.id,
-  name: t.name,
-  status: t.status,
-  version_no: t.versionNo,
-  academic_year_id: t.academicYearId,
-  effective_from: t.effectiveFrom,
-  effective_to: t.effectiveTo,
+/** The live timetable needs no version: views say so with `timetable: null` (kept for older clients). */
+const LIVE = null;
+
+/** A row of a teacher / venue / school grid: one time slot (periods differ per section). */
+const slotRow = (start: string, end: string) => ({
+  id: `slot-${start}-${end}`,
+  code: '',
+  name: `${start}–${end}`,
+  start_time: start,
+  end_time: end,
+  kind: 'LESSON' as const,
+  is_teaching: true,
+  status: 'ACTIVE' as const,
 });
 
-const periodBrief = (p: PeriodRow) => ({
-  id: p.id,
-  code: p.code,
-  name: p.name,
-  start_time: hhmm(p.startTime),
-  end_time: hhmm(p.endTime),
-  kind: p.kind,
-  is_teaching: p.kind === 'LESSON',
-  status: p.status,
-});
-
-/** Read models: grids per section / teacher / venue, "my timetable", a day's schedule, workload, CSV. */
+/** Read models of the live timetable: section / class / teacher / venue weeks, a day, workload, CSV. */
 export class ViewService {
   constructor(
     private readonly deps: Deps,
@@ -69,195 +63,185 @@ export class ViewService {
     return this.deps.db;
   }
 
-  // ---- which timetable ---------------------------------------------------------------
-
-  private async currentYearId(ex: Executor, tenantId: string) {
-    const [y] = await ex
-      .select({ id: academicYears.id })
-      .from(academicYears)
-      .where(and(eq(academicYears.tenantId, tenantId), eq(academicYears.isCurrent, true)));
-    return y?.id ?? null;
+  private async yearOf(ex: Executor, tenantId: string, q: { academic_year_id?: string }) {
+    return q.academic_year_id ?? (await currentYearId(ex, tenantId));
   }
 
-  /** The requested timetable, else the published one of the year (active year by default); null when none. */
-  private async pick(
-    ex: Executor,
-    tenantId: string,
-    principal: Principal,
-    q: z.infer<typeof ViewQuery>,
-  ): Promise<TimetableRow | null> {
-    if (q.timetable_id) return loadTimetable(ex, tenantId, q.timetable_id, principal);
-    const yearId = q.academic_year_id ?? (await this.currentYearId(ex, tenantId));
-    if (!yearId) return null;
-    const [t] = await ex
-      .select()
-      .from(timetables)
-      .where(
-        and(
-          eq(timetables.tenantId, tenantId),
-          eq(timetables.academicYearId, yearId),
-          eq(timetables.status, 'PUBLISHED'),
-        ),
-      );
-    return t ?? null;
-  }
-
-  /** The version that was in force on `date` (published, or archived after having been published). */
-  private async onDate(ex: Executor, tenantId: string, date: string): Promise<TimetableRow | null> {
-    const [year] = await ex
-      .select({ id: academicYears.id })
-      .from(academicYears)
-      .where(
-        and(
-          eq(academicYears.tenantId, tenantId),
-          lte(academicYears.startDate, date),
-          gte(academicYears.endDate, date),
-        ),
-      )
-      .orderBy(desc(academicYears.isCurrent), desc(academicYears.startDate))
-      .limit(1);
-    if (!year) return null;
-    const [t] = await ex
-      .select()
-      .from(timetables)
-      .where(
-        and(
-          eq(timetables.tenantId, tenantId),
-          eq(timetables.academicYearId, year.id),
-          isNotNull(timetables.publishedAt),
-          lte(timetables.effectiveFrom, date),
-          or(isNull(timetables.effectiveTo), gte(timetables.effectiveTo, date)),
-        ),
-      )
-      .orderBy(desc(timetables.effectiveFrom), desc(timetables.versionNo))
-      .limit(1);
-    return t ?? null;
-  }
-
-  // ---- grid ---------------------------------------------------------------------------
-
-  private async config_(ex: Executor, tenantId: string) {
+  private async settings(tenantId: string) {
     await this.config.ensureSettings(tenantId);
-    const settings = await readSettings(ex, tenantId);
-    const periods = await ex
-      .select()
-      .from(timetablePeriods)
-      .where(eq(timetablePeriods.tenantId, tenantId))
-      .orderBy(
-        asc(timetablePeriods.startTime),
-        asc(timetablePeriods.displayOrder),
-        asc(timetablePeriods.code),
-      );
-    return { settings, periods };
+    return readSettings(this.db, tenantId);
   }
 
-  /**
-   * Which periods a view shows. A section shows its own school day; the other
-   * views (teacher, venue, whole school) show the school's periods plus every
-   * period their lessons are in.
-   */
-  private viewPeriods(
-    all: PeriodRow[],
-    entries: EntryView[],
-    section?: { id: string; classId: string },
-  ): PeriodRow[] {
-    const used = new Set(entries.map((e) => e.period.id));
-    const mine = section
-      ? new Set(periodsForSection(all, section).map((p) => p.id))
-      : new Set(all.filter((p) => !p.academicClassId && !p.academicSectionId).map((p) => p.id));
-    return all.filter((p) => mine.has(p.id) || used.has(p.id));
-  }
-
-  private grid(periods: PeriodRow[], settings: SettingsRow, entries: EntryView[]) {
-    const usedPeriods = new Set(entries.map((e) => e.period.id));
-    const days = [...new Set([...settings.workingDays, ...entries.map((e) => e.day_of_week)])]
+  private days(settings: SettingsRow) {
+    return [...settings.workingDays]
       .sort((a, b) => a - b)
       .map((d) => ({ day_of_week: d, name: DAY_NAMES[d]! }));
-    const cell = new Map<string, EntryView>();
-    for (const e of entries) {
-      const k = `${e.day_of_week}:${e.period.id}`;
-      if (!cell.has(k)) cell.set(k, e);
-    }
-    return {
-      days,
-      periods: periods
-        .filter((p) => p.status === 'ACTIVE' || usedPeriods.has(p.id))
-        .map((p) => ({
-          ...periodBrief(p),
-          cells: days.map((d) => ({
-            day_of_week: d.day_of_week,
-            entry: cell.get(`${d.day_of_week}:${p.id}`) ?? null,
-          })),
-        })),
-    };
   }
 
-  private async entriesOf(
-    ex: Executor,
-    tenantId: string,
-    tt: TimetableRow | null,
-    principal: Principal | null,
-    where: ReturnType<typeof and>,
-  ): Promise<EntryView[]> {
-    if (!tt) return [];
-    const rowsIn = await fetchEntries(
-      ex,
-      and(
-        eq(timetableEntries.tenantId, tenantId),
-        eq(timetableEntries.timetableId, tt.id),
-        eq(timetableEntries.status, 'ACTIVE'),
-        principal ? entryScope(principal, 'timetable.read') : undefined,
-        where,
-      ),
+  /** Lessons the principal may read (section / class scope). */
+  private visible(lessons: Lesson[], principal: Principal | null) {
+    if (!principal) return lessons;
+    return lessons.filter((l) =>
+      sectionInScope(principal, 'timetable.read', {
+        id: l.owner.sectionId ?? '',
+        classId: l.owner.classId,
+      }),
     );
-    return rowsIn.map(presentEntry);
   }
 
-  // ---- views ------------------------------------------------------------------------------
-
-  async section(
-    tenantId: string,
-    sectionId: string,
-    q: z.infer<typeof ViewQuery>,
-    principal: Principal,
-  ) {
-    const section = await loadSection(this.db, tenantId, sectionId, principal, 'timetable.read');
-    const tt = await this.pick(this.db, tenantId, principal, q);
-    if (tt && tt.academicYearId !== section.academicYearId) throw new NotFoundError('Section');
-    const { settings, periods } = await this.config_(this.db, tenantId);
-    const entries = await this.entriesOf(
-      this.db,
-      tenantId,
-      tt,
-      principal,
-      eq(timetableEntries.sectionId, sectionId),
-    );
+  /** An owner's week: its own periods as rows, with what happens each working day. */
+  private ownerGrid(periods: LoadedPeriod[], settings: SettingsRow) {
+    const days = this.days(settings);
+    const active = periods.filter((lp) => lp.p.status === 'ACTIVE');
+    const lessons = lessonsOf(active, settings.workingDays);
     const bySubject = new Map<
       string,
-      { subject: EntryView['subject']; teacher: EntryView['teacher']; lessons: number }
+      { subject: LessonView['subject']; teacher: LessonView['teacher']; lessons: number }
     >();
-    for (const e of entries) {
-      const k = `${e.subject_offering_id}:${e.teacher.id}`;
-      const cur = bySubject.get(k) ?? { subject: e.subject, teacher: e.teacher, lessons: 0 };
+    for (const l of lessons.map(lessonPresent)) {
+      const k = `${l.subject_offering_id}:${l.teacher.id}`;
+      const cur = bySubject.get(k) ?? { subject: l.subject, teacher: l.teacher, lessons: 0 };
       cur.lessons++;
       bySubject.set(k, cur);
     }
     return {
-      timetable: tt ? brief(tt) : null,
-      section: {
-        id: section.id,
-        code: section.code,
-        name: section.name,
-        class: { id: section.classId, code: section.classCode, name: section.className },
-      },
-      ...this.grid(this.viewPeriods(periods, entries, { id: section.id, classId: section.classId }), settings, entries),
+      days,
+      periods: active.map((lp) => ({
+        ...periodBrief(lp.p),
+        version: lp.p.version,
+        lesson: lp.p.kind === 'LESSON' && lp.owner ? specPresent(lp.lesson) : null,
+        needs_subject: lp.p.kind === 'LESSON' && !lp.lesson.offering,
+        cells: days.map((d) => {
+          const c = cellOf(lp, d.day_of_week);
+          return {
+            day_of_week: d.day_of_week,
+            state: c.state,
+            overridden: lp.overrides.has(d.day_of_week),
+            entry: c.lesson ? lessonPresent(c.lesson) : null,
+          };
+        }),
+      })),
       summary: {
-        lessons_per_week: entries.length,
+        lessons_per_week: lessons.length,
+        empty_lesson_slots: active
+          .filter((lp) => lp.p.kind === 'LESSON')
+          .reduce(
+            (n, lp) => n + days.filter((d) => cellOf(lp, d.day_of_week).state === 'NOT_SET').length,
+            0,
+          ),
         subjects: [...bySubject.values()]
           .sort((a, b) => a.subject.name.localeCompare(b.subject.name))
           .map((s) => ({ subject: s.subject, teacher: s.teacher, lessons_per_week: s.lessons })),
       },
     };
+  }
+
+  /** Rows = distinct time slots of [lessons] (teacher / venue / school views). */
+  private slotGrid(lessons: Lesson[], settings: SettingsRow) {
+    const days = this.days(settings);
+    const slots = new Map<string, { start: string; end: string }>();
+    for (const l of lessons) {
+      const start = hhmm(l.period.p.startTime);
+      const end = hhmm(l.period.p.endTime);
+      slots.set(`${start}-${end}`, { start, end });
+    }
+    const rows = [...slots.values()].sort(
+      (a, b) => a.start.localeCompare(b.start) || a.end.localeCompare(b.end),
+    );
+    const views = lessons.map((l) => ({ l, v: lessonPresent(l) }));
+    return {
+      days,
+      periods: rows.map((r) => ({
+        ...slotRow(r.start, r.end),
+        cells: days.map((d) => {
+          const here = views.filter(
+            (x) =>
+              x.l.day === d.day_of_week &&
+              x.v.period.start_time === r.start &&
+              x.v.period.end_time === r.end,
+          );
+          return {
+            day_of_week: d.day_of_week,
+            state: here.length ? 'LESSON' : 'FREE',
+            entry: here[0]?.v ?? null,
+            /** More than one lesson in the same slot = a clash (shown, never saved on purpose). */
+            entries: here.map((x) => x.v),
+          };
+        }),
+      })),
+    };
+  }
+
+  // ---- section / class ------------------------------------------------------------------
+
+  async section(
+    tenantId: string,
+    sectionId: string,
+    _q: z.infer<typeof ViewQuery>,
+    principal: Principal,
+  ) {
+    const s = await loadSection(this.db, tenantId, sectionId, principal, 'timetable.read');
+    const settings = await this.settings(tenantId);
+    const owner: Owner = {
+      kind: 'SECTION',
+      sectionId: s.id,
+      classId: s.classId,
+      yearId: s.academicYearId,
+      title: `${s.className} ${s.name}`.trim(),
+      className: s.className,
+      classCode: s.classCode,
+      sectionName: s.name,
+      sectionCode: s.code,
+    };
+    const periods = await loadPeriods(this.db, tenantId, { extra: ownerFilter(owner) });
+    return {
+      timetable: LIVE,
+      academic_year_id: s.academicYearId,
+      section: {
+        id: s.id,
+        code: s.code,
+        name: s.name,
+        class: { id: s.classId, code: s.classCode, name: s.className },
+      },
+      ...this.ownerGrid(periods, settings),
+    };
+  }
+
+  async classView(
+    tenantId: string,
+    classId: string,
+    q: z.infer<typeof ViewQuery>,
+    principal: Principal,
+  ) {
+    const yearId = await this.yearOf(this.db, tenantId, q);
+    if (!yearId) throw new NotFoundError('Academic year');
+    const c = await loadClassOwner(this.db, tenantId, classId, yearId, principal, 'timetable.read');
+    const settings = await this.settings(tenantId);
+    const owner: Owner = {
+      kind: 'CLASS',
+      sectionId: null,
+      classId: c.id,
+      yearId,
+      title: c.name,
+      className: c.name,
+      classCode: c.code,
+      sectionName: null,
+      sectionCode: null,
+    };
+    const periods = await loadPeriods(this.db, tenantId, { extra: ownerFilter(owner) });
+    return {
+      timetable: LIVE,
+      academic_year_id: yearId,
+      class: { id: c.id, code: c.code, name: c.name },
+      ...this.ownerGrid(periods, settings),
+    };
+  }
+
+  // ---- teacher / venue ----------------------------------------------------------------------
+
+  private async yearLessons(tenantId: string, yearId: string | null, settings: SettingsRow) {
+    if (!yearId) return [];
+    return lessonsOf(await loadPeriods(this.db, tenantId, { yearId }), settings.workingDays);
   }
 
   private async teacherRow(ex: Executor, tenantId: string, id: string) {
@@ -277,28 +261,28 @@ export class ViewService {
     narrow: boolean,
   ) {
     const teacher = await this.teacherRow(this.db, tenantId, teacherId);
-    const tt = await this.pick(this.db, tenantId, principal, q);
-    const { settings, periods } = await this.config_(this.db, tenantId);
-    const entries = await this.entriesOf(
-      this.db,
-      tenantId,
-      tt,
+    const settings = await this.settings(tenantId);
+    const yearId = await this.yearOf(this.db, tenantId, q);
+    const lessons = this.visible(
+      (await this.yearLessons(tenantId, yearId, settings)).filter(
+        (l) => l.spec.teacher?.id === teacherId,
+      ),
       narrow ? principal : null,
-      eq(timetableEntries.teacherId, teacherId),
     );
     const byDay = new Map<number, number>();
-    for (const e of entries) byDay.set(e.day_of_week, (byDay.get(e.day_of_week) ?? 0) + 1);
+    for (const l of lessons) byDay.set(l.day, (byDay.get(l.day) ?? 0) + 1);
     return {
-      timetable: tt ? brief(tt) : null,
+      timetable: LIVE,
+      academic_year_id: yearId,
       teacher: {
         id: teacher.id,
         teacher_number: teacher.teacherNumber,
         full_name: fullName(teacher),
       },
-      ...this.grid(this.viewPeriods(periods, entries), settings, entries),
+      ...this.slotGrid(lessons, settings),
       summary: {
-        lessons_per_week: entries.length,
-        sections: new Set(entries.map((e) => e.section.id)).size,
+        lessons_per_week: lessons.length,
+        sections: new Set(lessons.map((l) => l.owner.sectionId ?? `C${l.owner.classId}`)).size,
         by_day: [...byDay.entries()]
           .sort((a, b) => a[0] - b[0])
           .map(([d, n]) => ({ day_of_week: d, lessons: n })),
@@ -348,17 +332,18 @@ export class ViewService {
       .from(timetableVenues)
       .where(and(eq(timetableVenues.id, venueId), eq(timetableVenues.tenantId, tenantId)));
     if (!v) throw new NotFoundError('Venue');
-    const tt = await this.pick(this.db, tenantId, principal, q);
-    const { settings, periods } = await this.config_(this.db, tenantId);
-    const entries = await this.entriesOf(
-      this.db,
-      tenantId,
-      tt,
+    const settings = await this.settings(tenantId);
+    const yearId = await this.yearOf(this.db, tenantId, q);
+    const lessons = this.visible(
+      (await this.yearLessons(tenantId, yearId, settings)).filter(
+        (l) => l.spec.venue?.id === venueId,
+      ),
       principal,
-      eq(timetableEntries.venueId, venueId),
     );
+    const grid = this.slotGrid(lessons, settings);
     return {
-      timetable: tt ? brief(tt) : null,
+      timetable: LIVE,
+      academic_year_id: yearId,
       venue: {
         id: v.id,
         code: v.code,
@@ -366,17 +351,17 @@ export class ViewService {
         venue_type: v.venueType,
         capacity: v.capacity,
       },
-      ...this.grid(this.viewPeriods(periods, entries), settings, entries),
+      ...grid,
       summary: {
-        lessons_per_week: entries.length,
-        lesson_slots_per_week:
-          periods.filter((p) => p.status === 'ACTIVE' && p.kind === 'LESSON').length *
-          settings.workingDays.length,
+        lessons_per_week: lessons.length,
+        lesson_slots_per_week: grid.periods.length * settings.workingDays.length,
       },
     };
   }
 
-  /** A day's schedule: period by period, for the school or narrowed to a section, teacher or venue. */
+  // ---- a day ----------------------------------------------------------------------------------
+
+  /** A day's schedule, period by period, for the school or narrowed to a section, teacher or venue. */
   async day(
     tenantId: string,
     q: z.infer<typeof DayViewQuery>,
@@ -385,9 +370,43 @@ export class ViewService {
   ) {
     const date = q.date ?? (await schoolToday(this.db, tenantId, this.deps.clock));
     const dow = isoWeekday(date);
-    const daySection = q.section_id
-      ? await loadSection(this.db, tenantId, q.section_id, principal, 'timetable.read')
-      : null;
+    const settings = await this.settings(tenantId);
+    const [year] = await this.db
+      .select({ id: academicYears.id })
+      .from(academicYears)
+      .where(and(eq(academicYears.tenantId, tenantId), eq(academicYears.isCurrent, true)));
+    const base = {
+      date,
+      day_of_week: dow,
+      day_name: DAY_NAMES[dow],
+      is_working_day: settings.workingDays.includes(dow),
+      timetable: LIVE,
+    };
+    if (q.section_id) {
+      const s = await loadSection(this.db, tenantId, q.section_id, principal, 'timetable.read');
+      const periods = (
+        await loadPeriods(this.db, tenantId, {
+          extra: ownerFilter({
+            kind: 'SECTION',
+            sectionId: s.id,
+            classId: s.classId,
+            yearId: s.academicYearId,
+            title: '',
+            className: '',
+            classCode: '',
+            sectionName: null,
+            sectionCode: null,
+          }),
+        })
+      ).filter((lp) => lp.p.status === 'ACTIVE');
+      return {
+        ...base,
+        periods: periods.map((lp) => {
+          const c = base.is_working_day ? cellOf(lp, dow) : { lesson: null };
+          return { ...periodBrief(lp.p), entries: c.lesson ? [lessonPresent(c.lesson)] : [] };
+        }),
+      };
+    }
     if (q.teacher_id) await this.teacherRow(this.db, tenantId, q.teacher_id);
     if (q.venue_id) {
       const [v] = await this.db
@@ -396,34 +415,26 @@ export class ViewService {
         .where(and(eq(timetableVenues.id, q.venue_id), eq(timetableVenues.tenantId, tenantId)));
       if (!v) throw new NotFoundError('Venue');
     }
-    const tt = await this.onDate(this.db, tenantId, date);
-    const { settings, periods } = await this.config_(this.db, tenantId);
-    const entries = await this.entriesOf(
-      this.db,
-      tenantId,
-      tt,
-      mine ? null : principal,
-      and(
-        eq(timetableEntries.dayOfWeek, dow),
-        q.section_id ? eq(timetableEntries.sectionId, q.section_id) : undefined,
-        mine ? eq(timetableEntries.teacherId, mine.teacherId) : undefined,
-        q.teacher_id ? eq(timetableEntries.teacherId, q.teacher_id) : undefined,
-        q.venue_id ? eq(timetableEntries.venueId, q.venue_id) : undefined,
-      ),
-    );
+    let lessons = base.is_working_day
+      ? (await this.yearLessons(tenantId, year?.id ?? null, settings)).filter((l) => l.day === dow)
+      : [];
+    if (mine) lessons = lessons.filter((l) => l.spec.teacher?.id === mine.teacherId);
+    else lessons = this.visible(lessons, principal);
+    if (q.teacher_id) lessons = lessons.filter((l) => l.spec.teacher?.id === q.teacher_id);
+    if (q.venue_id) lessons = lessons.filter((l) => l.spec.venue?.id === q.venue_id);
+    const views = lessons.map(lessonPresent);
+    const slots = [
+      ...new Set(views.map((v) => `${v.period.start_time}-${v.period.end_time}`)),
+    ].sort();
     return {
-      date,
-      day_of_week: dow,
-      day_name: DAY_NAMES[dow],
-      is_working_day: settings.workingDays.includes(dow),
-      timetable: tt ? brief(tt) : null,
-      periods: this.viewPeriods(
-        periods,
-        entries,
-        daySection ? { id: daySection.id, classId: daySection.classId } : undefined,
-      )
-        .filter((p) => p.status === 'ACTIVE' || entries.some((e) => e.period.id === p.id))
-        .map((p) => ({ ...periodBrief(p), entries: entries.filter((e) => e.period.id === p.id) })),
+      ...base,
+      periods: slots.map((k) => {
+        const [start, end] = k.split('-') as [string, string];
+        return {
+          ...slotRow(start, end),
+          entries: views.filter((v) => v.period.start_time === start && v.period.end_time === end),
+        };
+      }),
     };
   }
 
@@ -437,36 +448,17 @@ export class ViewService {
 
   // ---- workload -----------------------------------------------------------------------------
 
-  /** Lessons per week for every teaching staff member (derived from entries; nothing stored). */
+  /** Lessons per week for every teaching staff member (calculated from the live timetable). */
   async workload(tenantId: string, q: z.infer<typeof WorkloadQuery>, principal: Principal) {
     requireWide(principal, 'timetable.read');
-    const tt = await this.pick(this.db, tenantId, principal, q);
-    const usage = tt
-      ? await rows<{
-          teacher_id: string;
-          lessons: string | number;
-          sections: string | number;
-          offerings: string | number;
-          d1: string | number;
-          d2: string | number;
-          d3: string | number;
-          d4: string | number;
-          d5: string | number;
-          d6: string | number;
-          d7: string | number;
-        }>(
-          this.db,
-          sql`select e.teacher_id, count(*) as lessons, count(distinct e.section_id) as sections,
-                     count(distinct e.subject_offering_id) as offerings,
-                     sum(e.day_of_week = 1) as d1, sum(e.day_of_week = 2) as d2, sum(e.day_of_week = 3) as d3,
-                     sum(e.day_of_week = 4) as d4, sum(e.day_of_week = 5) as d5, sum(e.day_of_week = 6) as d6,
-                     sum(e.day_of_week = 7) as d7
-              from timetable_entries e
-              where e.tenant_id = ${tenantId} and e.timetable_id = ${tt.id} and e.status = 'ACTIVE'
-              group by e.teacher_id`,
-        )
-      : [];
-    const used = new Map(usage.map((u) => [u.teacher_id, u]));
+    const settings = await this.settings(tenantId);
+    const yearId = await this.yearOf(this.db, tenantId, q);
+    const lessons = await this.yearLessons(tenantId, yearId, settings);
+    const used = new Map<string, Lesson[]>();
+    for (const l of lessons) {
+      const id = l.spec.teacher!.id;
+      used.set(id, [...(used.get(id) ?? []), l]);
+    }
     const people = await this.db
       .select()
       .from(teachers)
@@ -474,18 +466,14 @@ export class ViewService {
         and(
           eq(teachers.tenantId, tenantId),
           or(
-            and(
-              eq(teachers.staffType, 'TEACHING'),
-              inArray(teachers.status, ['ACTIVE', 'ON_LEAVE']),
-            ),
+            inArray(teachers.status, ['ACTIVE', 'ON_LEAVE']),
             used.size ? inArray(teachers.id, [...used.keys()]) : undefined,
           ),
         ),
       );
     const data = people
       .map((t) => {
-        const u = used.get(t.id);
-        const n = (x: unknown) => Number(x ?? 0);
+        const mine = used.get(t.id) ?? [];
         return {
           teacher: {
             id: t.id,
@@ -493,11 +481,11 @@ export class ViewService {
             full_name: fullName(t),
             status: t.status,
           },
-          lessons_per_week: n(u?.lessons),
-          sections: n(u?.sections),
-          subject_offerings: n(u?.offerings),
+          lessons_per_week: mine.length,
+          sections: new Set(mine.map((l) => l.owner.sectionId ?? `C${l.owner.classId}`)).size,
+          subject_offerings: new Set(mine.map((l) => l.spec.offering!.id)).size,
           by_day: [1, 2, 3, 4, 5, 6, 7]
-            .map((d) => ({ day_of_week: d, lessons: n(u?.[`d${d}` as 'd1']) }))
+            .map((d) => ({ day_of_week: d, lessons: mine.filter((l) => l.day === d).length }))
             .filter((d) => d.lessons > 0),
         };
       })
@@ -506,33 +494,38 @@ export class ViewService {
           b.lessons_per_week - a.lessons_per_week ||
           a.teacher.full_name.localeCompare(b.teacher.full_name),
       );
-    return { timetable: tt ? brief(tt) : null, teachers: data };
+    return { timetable: LIVE, academic_year_id: yearId, teachers: data };
   }
 
   // ---- export -------------------------------------------------------------------------------
 
   async exportCsv(
     tenantId: string,
-    timetableId: string,
     q: z.infer<typeof ExportQuery>,
     principal: Principal,
     actor: Actor,
   ) {
-    const tt = await loadTimetable(this.db, tenantId, timetableId, principal);
     if (q.section_id)
       await loadSection(this.db, tenantId, q.section_id, principal, 'timetable.export');
-    const found = await fetchEntries(
-      this.db,
-      and(
-        eq(timetableEntries.tenantId, tenantId),
-        eq(timetableEntries.timetableId, tt.id),
-        eq(timetableEntries.status, 'ACTIVE'),
-        entryScope(principal, 'timetable.export'),
-        q.section_id ? eq(timetableEntries.sectionId, q.section_id) : undefined,
-        q.teacher_id ? eq(timetableEntries.teacherId, q.teacher_id) : undefined,
-        q.venue_id ? eq(timetableEntries.venueId, q.venue_id) : undefined,
-      ),
+    const settings = await this.settings(tenantId);
+    const yearId = await this.yearOf(this.db, tenantId, q);
+    let lessons = (await this.yearLessons(tenantId, yearId, settings)).filter((l) =>
+      sectionInScope(principal, 'timetable.export', {
+        id: l.owner.sectionId ?? '',
+        classId: l.owner.classId,
+      }),
     );
+    if (q.section_id) lessons = lessons.filter((l) => l.owner.sectionId === q.section_id);
+    if (q.teacher_id) lessons = lessons.filter((l) => l.spec.teacher?.id === q.teacher_id);
+    if (q.venue_id) lessons = lessons.filter((l) => l.spec.venue?.id === q.venue_id);
+    const views = lessons
+      .map(lessonPresent)
+      .sort(
+        (a, b) =>
+          a.day_of_week - b.day_of_week ||
+          a.period.start_time.localeCompare(b.period.start_time) ||
+          a.owner.title.localeCompare(b.owner.title),
+      );
     const lines = [
       csvLine([
         'Day',
@@ -547,36 +540,32 @@ export class ViewService {
         'Teacher',
         'Venue',
       ]),
-      ...found.map((r) => {
-        const e = presentEntry(r);
-        return csvLine([
+      ...views.map((e) =>
+        csvLine([
           e.day_name,
           e.period.name,
           e.period.start_time,
           e.period.end_time,
-          e.section.class.name,
-          e.section.name,
+          e.class.name,
+          e.section?.name ?? '',
           e.subject.code,
           e.subject.name,
           e.teacher.teacher_number,
           e.teacher.full_name,
           e.venue?.name ?? '',
-        ]);
-      }),
+        ]),
+      ),
     ];
     await this.db.transaction((tx) =>
       recordChange(tx, actor, tenantId, {
         action: 'TIMETABLE_EXPORTED',
         entityType: 'timetable',
-        entityId: tt.id,
+        entityId: yearId ?? tenantId,
         event: 'timetable.exported',
-        after: { rows: found.length, ...q },
-        payload: { rows: found.length, version_no: tt.versionNo },
+        after: { rows: views.length, ...q },
+        payload: { rows: views.length },
       }),
     );
-    return {
-      filename: `timetable-v${tt.versionNo}.csv`,
-      body: `${lines.join('\r\n')}\r\n`,
-    };
+    return { filename: 'timetable.csv', body: `${lines.join('\r\n')}\r\n` };
   }
 }

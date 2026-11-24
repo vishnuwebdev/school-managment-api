@@ -197,6 +197,8 @@ export const enrollments = mysqlTable(
     startDate: date('start_date', { mode: 'string' }).notNull(),
     endDate: date('end_date', { mode: 'string' }),
     reason: varchar('reason', { length: 500 }),
+    /** Roll number in the class / section for this year (0045). Free text: schools use 7, 07, A-12… */
+    rollNumber: varchar('roll_number', { length: 16 }),
     /**
      * Generated: student+year while the enrollment is open (PENDING/ACTIVE), NULL otherwise.
      * The UNIQUE on it gives "one open enrollment per student per year" without

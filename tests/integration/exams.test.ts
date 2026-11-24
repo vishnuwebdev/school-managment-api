@@ -132,6 +132,13 @@ describe('exam lifecycle', () => {
       201,
     );
     expect(exam).toMatchObject({ status: 'DRAFT', stage: 'MARKING', classes: 2, papers: 3 });
+    expect(exam).toMatchObject({
+      class_names: ['Class 5', 'Class 6'],
+      class_label: 'Class 5–6',
+      teacher_name: null,
+    });
+    const listed = (await ok<Json[]>(await api.get('/exams'))).find((e) => e.id === exam.id)!;
+    expect(listed).toMatchObject({ class_label: 'Class 5–6', classes: 2 });
     expect(exam.marks_expected).toBe(7); // 3 students × 2 papers in class 5, plus 1 in class 6
     papers = await ok(await api.get(`/exams/${exam.id}/papers?class_id=${classId}`));
     expect(papers).toHaveLength(2);
@@ -152,6 +159,7 @@ describe('exam lifecycle', () => {
     const pid = papers[0]!.id as string;
     const sheet = await ok(await api.get(`/exams/papers/${pid}/marks`));
     expect(sheet.rows).toHaveLength(3);
+    expect(sheet.rows[0]).toHaveProperty('roll_number'); // shown in the admin marks grid
     const bad = await api.put(`/exams/papers/${pid}/marks`, {
       records: [{ student_id: kids[0], marks: 51 }],
     });
@@ -237,6 +245,37 @@ describe('exam lifecycle', () => {
 });
 
 describe('isolation', () => {
+  it('keeps a class with no subjects offered in the exam, with no papers, so papers can be added by hand', async () => {
+    const bare = (
+      await ok(
+        await api.post('/academic-classes', { code: uniq('C9'), name: 'Class 9', sequence: 9 }),
+        201,
+      )
+    ).id;
+    const e = await ok(
+      await api.post('/exams', { name: uniq('NoSubj'), class_ids: [classId] }),
+      201,
+    );
+    const after = await ok(await api.post(`/exams/${e.id}/classes`, { class_ids: [bare] }));
+    expect(after.classes).toBe(2);
+    const row = (after.class_progress as Json[]).find((c) => c.class_id === bare)!;
+    expect(row).toMatchObject({ class_name: 'Class 9', papers: 0 });
+    const subj = (
+      await ok(
+        await api.post('/subjects', { code: uniq('S').toUpperCase(), name: uniq('Art') }),
+        201,
+      )
+    ).id;
+    await ok(await api.post(`/exams/${e.id}/papers`, { class_id: bare, subject_id: subj }), 201);
+    const withPaper = await ok(await api.get(`/exams/${e.id}`));
+    expect((withPaper.class_progress as Json[]).find((c) => c.class_id === bare)!.papers).toBe(1);
+    await ok(await api.delete(`/exams/${e.id}/classes/${bare}`), 204);
+    const removed = await ok(await api.get(`/exams/${e.id}`));
+    expect(removed.classes).toBe(1);
+    expect((removed.class_progress as Json[]).some((c) => c.class_id === bare)).toBe(false);
+    await ok(await api.delete(`/exams/${e.id}`), 204);
+  });
+
   it("another school cannot see or touch this school's exams", async () => {
     const e = await ok(await api.post('/exams', { name: 'Private', class_ids: [classId] }), 201);
     const other = B.admin.api;

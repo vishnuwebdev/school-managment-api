@@ -459,6 +459,7 @@ describe('guardians', () => {
     expect(dup.status).toBe(409);
     const detail = await api.get(`/guardians/${gid}`);
     expect(detail.body.data.students).toHaveLength(2);
+    expect(detail.body.data.students[0]).toHaveProperty('photo_file_id');
     const found = await api.get('/guardians?search=93333');
     expect(found.body.data[0].student_count).toBe(2);
     // Editing the guardian is shared across both children.

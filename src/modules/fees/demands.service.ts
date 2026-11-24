@@ -74,7 +74,7 @@ export async function reduceDemand(
   o: { today: string; now: Date },
 ) {
   if (!(ADJUSTABLE as readonly string[]).includes(d.status))
-    throw businessRule('DEMAND_NOT_ADJUSTABLE', 'This demand can no longer be adjusted', {
+    throw businessRule('DEMAND_NOT_ADJUSTABLE', 'This invoice can no longer be adjusted', {
       demand_status: d.status,
     });
   const m = moneyOf(d);
@@ -82,7 +82,7 @@ export async function reduceDemand(
   if (amount > out)
     throw businessRule(
       'EXCEEDS_OUTSTANDING',
-      'The reduction is more than the outstanding balance of the demand',
+      'The reduction is more than the outstanding balance of the invoice',
       { outstanding_amount: fromMinor(out), requested_amount: fromMinor(amount) },
       'OPERATION_NOT_ALLOWED',
     );
@@ -297,7 +297,7 @@ export class DemandService {
 
   private async issueLocked(tx: Executor, c: Caller, d: DemandRow, today: string, now: Date) {
     if (d.status !== 'DRAFT')
-      throw businessRule('NOT_DRAFT', 'Only a draft demand can be issued', {
+      throw businessRule('NOT_DRAFT', 'Only a draft invoice can be issued', {
         demand_id: d.id,
         demand_status: d.status,
       });
@@ -355,7 +355,7 @@ export class DemandService {
             feeScope(c.principal, 'fees.manage', feeDemands),
           ),
         );
-      if (visible.length !== ids.length) throw new NotFoundError('Fee demand');
+      if (visible.length !== ids.length) throw new NotFoundError('Fee invoice');
       const locked = await lockDemands(tx, c.tenantId, ids);
       const today = await schoolToday(tx, c.tenantId, this.deps.clock);
       const now = this.deps.clock.now();
@@ -371,13 +371,13 @@ export class DemandService {
       const d = await loadDemand(tx, c.tenantId, id, c.principal, 'fees.manage', 'update');
       if (staleVersion(d.version, version)) throw stale();
       if (!(CANCELLABLE as readonly string[]).includes(d.status))
-        throw businessRule('NOT_CANCELLABLE', 'This demand cannot be cancelled', {
+        throw businessRule('NOT_CANCELLABLE', 'This invoice cannot be cancelled', {
           demand_status: d.status,
         });
       if (toMinor(d.paidAmount) > 0n)
         throw businessRule(
           'HAS_PAYMENTS',
-          'Money has been allocated to this demand. Refund or reverse the payment first.',
+          'Money has been allocated to this invoice. Refund or reverse the payment first.',
           { paid_amount: d.paidAmount },
           'OPERATION_NOT_ALLOWED',
         );
@@ -416,7 +416,7 @@ export class DemandService {
       if (!(['ISSUED', 'PARTIALLY_PAID', 'OVERDUE'] as string[]).includes(d.status))
         throw businessRule(
           'NOT_WRITABLE_OFF',
-          'Only an issued demand with a balance can be written off',
+          'Only an issued invoice with a balance can be written off',
           {
             demand_status: d.status,
           },
@@ -578,7 +578,7 @@ export class DemandService {
       if (r === 'NOT_ELIGIBLE')
         throw businessRule(
           'NOT_YET_LATE',
-          'This demand has no late fee yet (not past due plus the grace period, or nothing outstanding)',
+          'This invoice has no late fee yet (not past due plus the grace period, or nothing outstanding)',
           { due_date: d.dueDate, grace_days: settings.lateFeeGraceDays },
           'OPERATION_NOT_ALLOWED',
         );

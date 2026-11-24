@@ -20,6 +20,7 @@ const BASE_STARTER: FeatureCode[] = [
   'students.documents',
   'academics',
   'teachers',
+  'teachers.mobile_app',
   'attendance',
   'communication',
   'reports',
@@ -55,19 +56,12 @@ const BASE_STANDARD: FeatureCode[] = [
   'examinations',
   'fees',
   'timetable',
-  'leave',
   'parent_portal',
 ];
 const STANDARD: FeatureCode[] = withCapabilities(BASE_STANDARD);
 const PREMIUM: FeatureCode[] = withCapabilities([
   ...BASE_STANDARD,
   'attendance.subject',
-  'examinations.online_results',
-  'fees.online_payments',
-  'library',
-  'transport',
-  'communication.sms',
-  'integrations',
   'custom_roles',
 ]);
 
@@ -93,7 +87,7 @@ export const PLANS: PlanDef[] = [
   {
     code: 'PREMIUM',
     name: 'Premium',
-    description: 'Everything, including library, transport and integrations.',
+    description: 'Adds custom roles and subject/period attendance.',
     currency: 'INR',
     priceMonthlyMinor: 999_900,
     priceAnnualMinor: 9_999_000,

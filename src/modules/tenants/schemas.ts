@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { PaymentBody } from '../billing/billing.schemas.js';
 import { BILLING_INTERVAL } from '../../db/schema/index.js';
+import { PasswordSchema } from '../identity/password.js';
 
 const nullableText = (max: number) => z.string().trim().max(max).nullable().optional();
 
@@ -96,21 +97,46 @@ export const SettingsBody = z.object({
 });
 
 export const ProvisionBody = z.object({
-  plan_code: z.string().min(1).max(64),
+  /** Full product mode only (simple mode has no plans; the field is ignored there). */
+  plan_code: z.string().min(1).max(64).optional(),
+  /** Simple mode: switch the Teacher app / Parent app on for this school (off by default). */
+  teacher_app: z.boolean().default(false),
+  parent_app: z.boolean().default(false),
   billing_interval: z.enum(BILLING_INTERVAL).default('ANNUAL'),
   /** 0 = start a paid subscription immediately. */
   trial_days: z.number().int().min(0).max(90).default(14),
-  admin: z.object({
-    email: z.email().max(254),
-    first_name: z.string().trim().min(1).max(100),
-    last_name: z.string().trim().max(100).optional(),
-  }),
+  admin: z
+    .object({
+      /** The admin signs in with this email and/or the mobile number below. */
+      email: z.email().max(254).optional(),
+      mobile: z.string().trim().min(7).max(32).optional(),
+      first_name: z.string().trim().min(1).max(100),
+      last_name: z.string().trim().max(100).optional(),
+      /**
+       * Optional. When given, the admin's login works at once with this password and no
+       * invitation email is sent; the platform team hands the details over.
+       */
+      password: PasswordSchema.optional(),
+    })
+    .refine((a) => !!a.email || !!a.mobile, {
+      message: 'Add an email or a mobile number',
+      path: ['email'],
+    })
+    .refine((a) => !!a.email || !!a.password, {
+      message: 'Without an email, set a password now',
+      path: ['password'],
+    }),
   settings: SettingsBody.omit({ version: true }).optional(),
   /** Price reduction agreed with the school, in minor units (paid subscriptions only). */
   discount_minor: z.number().int().min(0).optional(),
   /** A payment already received offline for this subscription (paid subscriptions only). */
   payment: PaymentBody.optional(),
 });
+
+/** The platform team sets (or resets) a school admin's password. */
+export const AdminPasswordBody = z.object({ password: PasswordSchema });
+/** Change (or remove, with null) the mobile number a school admin signs in with. */
+export const AdminMobileBody = z.object({ mobile: z.string().trim().min(7).max(32).nullable() });
 
 export const ChangeSubscriptionBody = z.object({
   plan_code: z.string().min(1).max(64),
@@ -126,5 +152,17 @@ export const ChangeSubscriptionBody = z.object({
   discount_minor: z.number().int().min(0).optional(),
   payment: PaymentBody.optional(),
 });
+
+/** Simple mode: the Super Admin switches a school's mobile apps on or off. */
+export const AppsBody = z
+  .object({
+    teacher_app: z.boolean().optional(),
+    parent_app: z.boolean().optional(),
+    reason: z.string().trim().min(3).max(500).optional(),
+  })
+  .refine((b) => b.teacher_app !== undefined || b.parent_app !== undefined, {
+    message: 'Send teacher_app and/or parent_app',
+    path: ['teacher_app'],
+  });
 
 export const ReasonBody = z.object({ reason: z.string().trim().min(3).max(500) });

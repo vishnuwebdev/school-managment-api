@@ -55,6 +55,14 @@ const EnvSchema = z.object({
     .min(32, 'DATA_ENCRYPTION_KEY must be at least 32 characters')
     .optional(),
 
+  /**
+   * simple (default): every school gets every built feature; only the Super Admin (platform)
+   * and each school's School Admin sign in to the admin panel; the Super Admin switches the
+   * Teacher app and Parent app on or off per school. No plans, subscriptions, platform
+   * sub-users or school sub-users (their code and data are kept, switched off).
+   * full: the original model (plans, subscriptions, billing, users and roles).
+   */
+  PRODUCT_MODE: z.enum(['simple', 'full']).default('simple'),
   SUBSCRIPTION_GRACE_DAYS: z.coerce.number().int().nonnegative().default(30),
   CACHE_TTL_SECONDS: z.coerce.number().int().nonnegative().default(60),
   OUTBOX_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(1000),

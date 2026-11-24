@@ -179,13 +179,21 @@ export class StudentService {
       );
     }
     const where = and(...conds);
-    const [rows, [total]] = await Promise.all([
-      this.db
-        .select()
-        .from(students)
-        .where(where)
-        .orderBy(
-          orderFrom(
+    // Roll numbers live on the open enrollment, not on the student; they are text
+    // ("7", "12", "A3"), so pad them to sort 2 before 10. Students without one go last.
+    const rollKey = sql`(select coalesce(lpad(${enrollments.rollNumber}, 16, '0'), '~') from ${enrollments} where ${and(
+      eq(enrollments.tenantId, students.tenantId),
+      eq(enrollments.studentId, students.id),
+      inArray(enrollments.status, OPEN),
+      q.academic_year_id ? eq(enrollments.academicYearId, q.academic_year_id) : undefined,
+      q.section_id ? eq(enrollments.sectionId, q.section_id) : undefined,
+    )} limit 1)`;
+    const primaryOrder =
+      q.sort === 'roll_number'
+        ? q.order === 'desc'
+          ? desc(rollKey)
+          : asc(rollKey)
+        : orderFrom(
             { ...q, order: q.sort ? q.order : 'asc' },
             {
               name: students.lastName,
@@ -196,9 +204,13 @@ export class StudentService {
               created_at: students.createdAt,
             },
             'name',
-          ),
-          asc(students.firstName),
-        )
+          );
+    const [rows, [total]] = await Promise.all([
+      this.db
+        .select()
+        .from(students)
+        .where(where)
+        .orderBy(primaryOrder, asc(students.firstName))
         .limit(q.page_size)
         .offset(offsetOf(q)),
       this.db.select({ n: count() }).from(students).where(where),
@@ -846,6 +858,7 @@ function placement(r: {
     academic_year: { id: r.e.academicYearId, code: r.yearCode, is_current: r.current },
     class: { id: r.e.classId, name: r.className },
     section: r.e.sectionId ? { id: r.e.sectionId, name: r.sectionName } : null,
+    roll_number: r.e.rollNumber,
     start_date: r.e.startDate,
   };
 }

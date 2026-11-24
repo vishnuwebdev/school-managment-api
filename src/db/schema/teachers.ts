@@ -12,14 +12,13 @@ import {
   varchar,
 } from 'drizzle-orm/mysql-core';
 import { createdAt, dt, id, ref, updatedAt, version } from './_columns.js';
-import { academicSections, subjectOfferings } from './academic.js';
+import { academicClasses, academicSections, academicYears, subjectOfferings } from './academic.js';
 import {
   ASSIGNMENT_ROLE,
   EMPLOYMENT_TYPE,
   GENDER,
   QUALIFICATION_STATUS,
   QUALIFICATION_TYPE,
-  STAFF_TYPE,
   TEACHER_STATUS,
   TEACHING_ASSIGNMENT_STATUS,
 } from './enums.js';
@@ -28,9 +27,10 @@ import type { PostalAddress } from './students.js';
 import { tenants } from './tenancy.js';
 
 /**
- * Teachers and staff (Part 15). A teacher is a personnel record owned by the
- * school; a login (membership) is optional and linked separately. No payroll,
- * salary or credential data lives here.
+ * Teachers (Part 15). A teacher is a personnel record owned by the school; a
+ * login (membership) is optional and linked separately. Teaching staff only:
+ * non-teaching staff belong to the future Staff section (0040_teachers_only).
+ * No payroll, salary or credential data lives here.
  */
 export const teachers = mysqlTable(
   'teachers',
@@ -41,7 +41,6 @@ export const teachers = mysqlTable(
       .references(() => tenants.id),
     /** Business identifier, unique per school. Not the primary key. */
     teacherNumber: varchar('teacher_number', { length: 32 }).notNull(),
-    staffType: mysqlEnum('staff_type', STAFF_TYPE).notNull().default('TEACHING'),
     status: mysqlEnum('status', TEACHER_STATUS).notNull().default('ACTIVE'),
     firstName: varchar('first_name', { length: 100 }).notNull(),
     middleName: varchar('middle_name', { length: 100 }),
@@ -83,7 +82,6 @@ export const teachers = mysqlTable(
     uniqueIndex('teachers_membership_uq').on(t.membershipId),
     index('teachers_tenant_status_idx').on(t.tenantId, t.status),
     index('teachers_tenant_name_idx').on(t.tenantId, t.lastName, t.firstName),
-    index('teachers_tenant_type_idx').on(t.tenantId, t.staffType, t.status),
     index('teachers_tenant_department_idx').on(t.tenantId, t.department),
     foreignKey({
       name: 'teachers_manager_fk',
@@ -249,6 +247,57 @@ export const sectionClassTeachers = mysqlTable(
     }),
     foreignKey({
       name: 'section_class_teachers_teacher_fk',
+      columns: [t.tenantId, t.teacherId],
+      foreignColumns: [teachers.tenantId, teachers.id],
+    }),
+  ],
+);
+
+/**
+ * The class teacher of a whole class that has no sections in an academic year
+ * (e.g. Nursery). One open row per class and year (ACTIVE); changing it ends the
+ * old row, so history is kept. Classes with sections use section_class_teachers.
+ */
+export const classClassTeachers = mysqlTable(
+  'class_class_teachers',
+  {
+    id: id(),
+    tenantId: ref('tenant_id')
+      .notNull()
+      .references(() => tenants.id),
+    classId: ref('class_id').notNull(),
+    academicYearId: ref('academic_year_id').notNull(),
+    teacherId: ref('teacher_id').notNull(),
+    status: mysqlEnum('status', ['ACTIVE', 'ENDED']).notNull().default('ACTIVE'),
+    startDate: date('start_date', { mode: 'string' }).notNull(),
+    endDate: date('end_date', { mode: 'string' }),
+    reason: varchar('reason', { length: 500 }),
+    /** Generated: `<class>:<year>` while ACTIVE, NULL otherwise. UNIQUE = one open class teacher per class and year. */
+    openKey: varchar('open_key', { length: 80 }).generatedAlwaysAs(
+      sql`(IF(\`status\` = 'ACTIVE', CONCAT(\`class_id\`, ':', \`academic_year_id\`), NULL))`,
+      { mode: 'virtual' },
+    ),
+    createdBy: ref('created_by'),
+    createdAt: createdAt(),
+    updatedBy: ref('updated_by'),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    uniqueIndex('class_class_teachers_open_uq').on(t.tenantId, t.openKey),
+    index('class_class_teachers_teacher_idx').on(t.tenantId, t.teacherId, t.status),
+    index('class_class_teachers_class_idx').on(t.tenantId, t.classId, t.academicYearId, t.status),
+    foreignKey({
+      name: 'class_class_teachers_class_fk',
+      columns: [t.tenantId, t.classId],
+      foreignColumns: [academicClasses.tenantId, academicClasses.id],
+    }),
+    foreignKey({
+      name: 'class_class_teachers_year_fk',
+      columns: [t.tenantId, t.academicYearId],
+      foreignColumns: [academicYears.tenantId, academicYears.id],
+    }),
+    foreignKey({
+      name: 'class_class_teachers_teacher_fk',
       columns: [t.tenantId, t.teacherId],
       foreignColumns: [teachers.tenantId, teachers.id],
     }),

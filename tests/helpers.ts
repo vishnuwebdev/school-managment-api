@@ -2,6 +2,7 @@ import request from 'supertest';
 import { expect } from 'vitest';
 import { createApp } from '../src/app.js';
 import { closeDeps, createDeps } from '../src/bootstrap.js';
+import { loadEnv } from '../src/config/env.js';
 import { seedSuperAdmin } from '../src/db/seed.js';
 import { processEvent, relayOutbox } from '../src/events/processor.js';
 import { defineRoute } from '../src/http/route.js';
@@ -33,12 +34,12 @@ const probeRoutes = [
   }),
   defineRoute({
     method: 'get',
-    path: '/_probe/transport',
+    path: '/_probe/custom-roles',
     summary: 'probe',
     tags: ['Test'],
     access: 'tenant',
-    permissions: ['transport.read'],
-    handler: async () => ({ data: 'transport-ok' }),
+    permissions: ['roles.create'],
+    handler: async () => ({ data: 'custom-roles-ok' }),
   }),
   defineRoute({
     method: 'get',
@@ -67,10 +68,11 @@ export interface Api {
   delete(url: string, body?: object): request.Test;
 }
 
-export async function createHarness() {
+export async function createHarness(opts: { mode?: 'simple' | 'full' } = {}) {
   const clock = new TestClock();
   const mailer = new MemoryMailer();
-  const deps = createDeps({ mailer, clock });
+  const env = loadEnv({ ...process.env, ...(opts.mode ? { PRODUCT_MODE: opts.mode } : {}) });
+  const deps = createDeps({ mailer, clock, env });
   const svc = buildServices(deps);
   const app = createApp(deps, svc, { extraRoutes: probeRoutes });
   await seedSuperAdmin(deps.db, SUPER.email, SUPER.password);

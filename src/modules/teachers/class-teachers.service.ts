@@ -5,6 +5,7 @@ import {
   academicClasses,
   academicSections,
   academicYears,
+  classClassTeachers,
   sectionClassTeachers,
   subjectOfferings,
   subjects,
@@ -143,12 +144,6 @@ export class ClassTeacherService {
           'Only active teachers can be made class teacher',
           { teacher_status: teacher.status },
         );
-      if (teacher.staffType !== 'TEACHING')
-        throw new BusinessRuleError(
-          'OPERATION_NOT_ALLOWED',
-          'Only teaching staff can be class teacher',
-          { staff_type: teacher.staffType },
-        );
       const section = await this.loadSection(tx, tenantId, sectionId);
       const today = todayIso(this.deps.clock);
       const [open] = await tx
@@ -262,7 +257,292 @@ export class ClassTeacherService {
       .for('update');
     const today = todayIso(this.deps.clock);
     for (const row of open) await this.endRow(tx, tenantId, row, today, reason, actor);
-    return open.length;
+    const openClasses = await tx
+      .select()
+      .from(classClassTeachers)
+      .where(
+        and(
+          eq(classClassTeachers.tenantId, tenantId),
+          eq(classClassTeachers.teacherId, teacherId),
+          eq(classClassTeachers.status, 'ACTIVE'),
+        ),
+      )
+      .for('update');
+    for (const row of openClasses) await this.endClassRow(tx, tenantId, row, today, reason, actor);
+    return open.length + openClasses.length;
+  }
+
+  // ---- classes without sections ------------------------------------------------------
+
+  /**
+   * A class with no sections in the year (e.g. Nursery) has one class teacher for
+   * the whole class. 422 CLASS_HAS_SECTIONS when the class is split into sections.
+   */
+  private async loadClassYear(
+    tx: Parameters<Parameters<Deps['db']['transaction']>[0]>[0],
+    tenantId: string,
+    classId: string,
+    yearId: string | undefined,
+  ) {
+    const [k] = await tx
+      .select()
+      .from(academicClasses)
+      .where(and(eq(academicClasses.id, classId), eq(academicClasses.tenantId, tenantId)))
+      .for('share');
+    if (!k) throw new NotFoundError('Class');
+    if (k.status !== 'ACTIVE')
+      throw new BusinessRuleError('OPERATION_NOT_ALLOWED', 'The class is not active', {
+        class_status: k.status,
+      });
+    const [y] = await tx
+      .select()
+      .from(academicYears)
+      .where(
+        and(
+          eq(academicYears.tenantId, tenantId),
+          yearId ? eq(academicYears.id, yearId) : eq(academicYears.status, 'ACTIVE'),
+        ),
+      )
+      .limit(1);
+    if (!y) throw new NotFoundError('Academic year');
+    if (y.status !== 'UPCOMING' && y.status !== 'ACTIVE')
+      throw new BusinessRuleError(
+        'OPERATION_NOT_ALLOWED',
+        'A class teacher can only be set for an upcoming or active academic year',
+        { academic_year_status: y.status },
+      );
+    const [sec] = await tx
+      .select({ id: academicSections.id })
+      .from(academicSections)
+      .where(
+        and(
+          eq(academicSections.tenantId, tenantId),
+          eq(academicSections.classId, classId),
+          eq(academicSections.academicYearId, y.id),
+          inArray(academicSections.status, ['ACTIVE', 'DRAFT']),
+        ),
+      )
+      .limit(1);
+    if (sec)
+      throw new BusinessRuleError(
+        'OPERATION_NOT_ALLOWED',
+        `${k.name} has sections: set the class teacher of each section instead`,
+        { reason: 'CLASS_HAS_SECTIONS', class_id: classId },
+      );
+    return { klass: k, year: y, label: { academic_year: y.code, class: k.name } };
+  }
+
+  /** Make `teacher_id` the class teacher of a whole class (no sections), ending the previous one. */
+  async assignClass(
+    tenantId: string,
+    classId: string,
+    yearId: string | undefined,
+    input: z.infer<typeof AssignClassTeacherBody>,
+    principal: Principal,
+    actor: Actor,
+  ) {
+    let resolvedYear!: string;
+    await this.db.transaction(async (tx) => {
+      const teacher = await loadTeacher(
+        tx,
+        tenantId,
+        input.teacher_id,
+        principal,
+        'teachers.assignments.manage',
+        { lock: true },
+      );
+      if (teacher.status !== 'ACTIVE')
+        throw new BusinessRuleError(
+          'INVALID_STATE',
+          'Only active teachers can be made class teacher',
+          { teacher_status: teacher.status },
+        );
+      const { year, label } = await this.loadClassYear(tx, tenantId, classId, yearId);
+      resolvedYear = year.id;
+      const today = todayIso(this.deps.clock);
+      const [open] = await tx
+        .select()
+        .from(classClassTeachers)
+        .where(
+          and(
+            eq(classClassTeachers.tenantId, tenantId),
+            eq(classClassTeachers.classId, classId),
+            eq(classClassTeachers.academicYearId, year.id),
+            eq(classClassTeachers.status, 'ACTIVE'),
+          ),
+        )
+        .for('update');
+      if (open?.teacherId === teacher.id)
+        throw new ConflictError(
+          'DUPLICATE_RESOURCE',
+          'This teacher is already the class teacher of that class',
+          { class_id: classId },
+        );
+      if (open) await this.endClassRow(tx, tenantId, open, today, input.reason ?? null, actor);
+      try {
+        const [ins] = await tx
+          .insert(classClassTeachers)
+          .values({
+            tenantId,
+            classId,
+            academicYearId: year.id,
+            teacherId: teacher.id,
+            status: 'ACTIVE',
+            startDate: input.start_date ?? today,
+            reason: input.reason ?? null,
+            createdBy: actor.userId,
+            updatedBy: actor.userId,
+          })
+          .$returningId();
+        await addTeacherHistory(tx, actor, tenantId, teacher.id, {
+          eventType: 'CLASS_TEACHER_ASSIGNED',
+          effectiveDate: input.start_date ?? today,
+          reason: input.reason ?? null,
+          details: { class_id: classId, ...label },
+        });
+        await recordChange(tx, actor, tenantId, {
+          action: 'CLASS_TEACHER_ASSIGNED',
+          entityType: 'class_class_teacher',
+          entityId: ins!.id,
+          event: 'class_teacher.assigned',
+          before: open ? { teacher_id: open.teacherId } : null,
+          after: { teacher_id: teacher.id, class_id: classId, academic_year_id: year.id },
+          payload: { teacher_id: teacher.id, class_id: classId, academic_year_id: year.id },
+        });
+      } catch (err) {
+        if (isDuplicateKeyError(err))
+          throw new ConflictError('CONFLICT', 'The class teacher was changed by someone else', {
+            class_id: classId,
+          });
+        throw err;
+      }
+    });
+    await refreshTeacherAccess(this.deps, tenantId);
+    return this.classCurrent(tenantId, classId, resolvedYear);
+  }
+
+  /** End the class teacher of a whole class without naming a replacement. */
+  async removeClass(
+    tenantId: string,
+    classId: string,
+    yearId: string | undefined,
+    reason: string,
+    principal: Principal,
+    actor: Actor,
+  ) {
+    await this.db.transaction(async (tx) => {
+      const [k] = await tx
+        .select({ id: academicClasses.id })
+        .from(academicClasses)
+        .where(and(eq(academicClasses.id, classId), eq(academicClasses.tenantId, tenantId)));
+      if (!k) throw new NotFoundError('Class');
+      const [open] = await tx
+        .select({ row: classClassTeachers })
+        .from(classClassTeachers)
+        .innerJoin(academicYears, eq(academicYears.id, classClassTeachers.academicYearId))
+        .where(
+          and(
+            eq(classClassTeachers.tenantId, tenantId),
+            eq(classClassTeachers.classId, classId),
+            eq(classClassTeachers.status, 'ACTIVE'),
+            yearId
+              ? eq(classClassTeachers.academicYearId, yearId)
+              : eq(academicYears.status, 'ACTIVE'),
+          ),
+        )
+        .for('update');
+      if (!open) throw new NotFoundError('Class teacher');
+      await loadTeacher(
+        tx,
+        tenantId,
+        open.row.teacherId,
+        principal,
+        'teachers.assignments.manage',
+        {
+          lock: true,
+        },
+      );
+      await this.endClassRow(tx, tenantId, open.row, todayIso(this.deps.clock), reason, actor);
+    });
+    await refreshTeacherAccess(this.deps, tenantId);
+  }
+
+  /** The current class teacher of a whole class in a year (null when none). */
+  async classCurrent(tenantId: string, classId: string, yearId: string) {
+    const [r] = await this.db
+      .select({
+        ct: classClassTeachers,
+        t: {
+          id: teachers.id,
+          teacherNumber: teachers.teacherNumber,
+          firstName: teachers.firstName,
+          middleName: teachers.middleName,
+          lastName: teachers.lastName,
+          status: teachers.status,
+        },
+      })
+      .from(classClassTeachers)
+      .innerJoin(
+        teachers,
+        and(
+          eq(teachers.tenantId, classClassTeachers.tenantId),
+          eq(teachers.id, classClassTeachers.teacherId),
+        ),
+      )
+      .where(
+        and(
+          eq(classClassTeachers.tenantId, tenantId),
+          eq(classClassTeachers.classId, classId),
+          eq(classClassTeachers.academicYearId, yearId),
+          eq(classClassTeachers.status, 'ACTIVE'),
+        ),
+      );
+    return {
+      class_id: classId,
+      academic_year_id: yearId,
+      class_teacher: r
+        ? {
+            teacher_id: r.t.id,
+            teacher_number: r.t.teacherNumber,
+            full_name: fullName(r.t),
+            status: r.t.status,
+            since: r.ct.startDate,
+          }
+        : null,
+    };
+  }
+
+  private async endClassRow(
+    tx: Parameters<Parameters<Deps['db']['transaction']>[0]>[0],
+    tenantId: string,
+    row: typeof classClassTeachers.$inferSelect,
+    endDate: string,
+    reason: string | null,
+    actor: Actor,
+  ) {
+    await tx
+      .update(classClassTeachers)
+      .set({
+        status: 'ENDED',
+        endDate: endDate < row.startDate ? row.startDate : endDate,
+        reason,
+        updatedBy: actor.userId,
+      })
+      .where(eq(classClassTeachers.id, row.id));
+    await addTeacherHistory(tx, actor, tenantId, row.teacherId, {
+      eventType: 'CLASS_TEACHER_ENDED',
+      effectiveDate: endDate,
+      reason,
+      details: { class_id: row.classId, academic_year_id: row.academicYearId },
+    });
+    await recordChange(tx, actor, tenantId, {
+      action: 'CLASS_TEACHER_ENDED',
+      entityType: 'class_class_teacher',
+      entityId: row.id,
+      event: 'class_teacher.ended',
+      before: { teacher_id: row.teacherId, class_id: row.classId },
+      payload: { teacher_id: row.teacherId, class_id: row.classId },
+    });
   }
 
   private async endRow(
@@ -426,6 +706,7 @@ export class ClassTeacherService {
       .select({
         id: teachingAssignments.id,
         role: teachingAssignments.role,
+        subjectId: subjects.id,
         subjectName: subjects.name,
         subjectCode: subjects.code,
         sectionId: academicSections.id,
@@ -467,7 +748,7 @@ export class ClassTeacherService {
       teaching: teaching.map((r) => ({
         assignment_id: r.id,
         role: r.role,
-        subject: { code: r.subjectCode, name: r.subjectName },
+        subject: { id: r.subjectId, code: r.subjectCode, name: r.subjectName },
         class_id: r.classId,
         class: r.className,
         section_id: r.sectionId,

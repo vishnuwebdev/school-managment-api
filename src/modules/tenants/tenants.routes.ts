@@ -7,6 +7,9 @@ import { actorFrom, type Actor } from '../../platform/context.js';
 import { PaginationQuery } from '../../shared/pagination.js';
 import type { EntitlementService } from '../entitlements/entitlements.service.js';
 import {
+  AdminMobileBody,
+  AppsBody,
+  AdminPasswordBody,
   ChangeSubscriptionBody,
   CreateTenantBody,
   ProvisionBody,
@@ -95,6 +98,67 @@ export function platformTenantRoutes(tenantsSvc: TenantService, entitlements: En
       body: ProvisionBody,
       handler: async ({ params, body, req }) => ({
         data: await tenantsSvc.provision(params.id, body, platformActor(req, params.id)),
+      }),
+    }),
+    defineRoute({
+      method: 'get',
+      path: '/platform/tenants/:id/admins',
+      summary: "The school's admins and whether each login is ready",
+      tags: ['Platform · Schools'],
+      access: 'platform',
+      permissions: ['platform.tenants.read'],
+      params: IdParams,
+      handler: async ({ params }) => ({ data: await tenantsSvc.listAdmins(params.id) }),
+    }),
+    defineRoute({
+      method: 'put',
+      path: '/platform/tenants/:id/admins/:membershipId/mobile',
+      summary: 'Change (or remove, with null) the mobile number a school admin signs in with',
+      tags: ['Platform · Schools'],
+      access: 'platform',
+      permissions: ['platform.tenants.provision'],
+      params: IdParams.extend({ membershipId: z.string().uuid() }),
+      body: AdminMobileBody,
+      handler: async ({ params, body, req }) => ({
+        data: await tenantsSvc.setAdminMobile(
+          params.id,
+          params.membershipId,
+          body.mobile,
+          platformActor(req, params.id),
+        ),
+      }),
+    }),
+    defineRoute({
+      method: 'put',
+      path: '/platform/tenants/:id/admins/:membershipId/password',
+      summary: "Set or reset a school admin's password (signs them out everywhere)",
+      tags: ['Platform · Schools'],
+      access: 'platform',
+      permissions: ['platform.tenants.provision'],
+      params: IdParams.extend({ membershipId: z.string().uuid() }),
+      body: AdminPasswordBody,
+      handler: async ({ params, body, req }) => ({
+        data: await tenantsSvc.setAdminPassword(
+          params.id,
+          params.membershipId,
+          body.password,
+          platformActor(req, params.id),
+        ),
+      }),
+    }),
+    defineRoute({
+      method: 'put',
+      path: '/platform/tenants/:id/apps',
+      summary:
+        'Switch the Teacher app and/or Parent app on or off for a school (simple mode). ' +
+        'Switching an app off signs its teachers / parents out at once.',
+      tags: ['Platform · Schools'],
+      access: 'platform',
+      permissions: ['platform.entitlements.override'],
+      params: IdParams,
+      body: AppsBody,
+      handler: async ({ params, body, req }) => ({
+        data: await tenantsSvc.setApps(params.id, body, platformActor(req, params.id)),
       }),
     }),
     defineRoute({

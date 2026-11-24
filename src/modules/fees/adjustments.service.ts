@@ -145,7 +145,7 @@ export class AdjustmentService {
         'share',
       );
       if (!(ADJUSTABLE as readonly string[]).includes(d.status))
-        throw businessRule('DEMAND_NOT_ADJUSTABLE', 'This demand can no longer be adjusted', {
+        throw businessRule('DEMAND_NOT_ADJUSTABLE', 'This invoice can no longer be adjusted', {
           demand_status: d.status,
         });
       const amount = amountOf({ valueType: input.value_type, value: input.value }, d);
@@ -160,7 +160,7 @@ export class AdjustmentService {
       if (amount > out)
         throw businessRule(
           'EXCEEDS_OUTSTANDING',
-          'The request is more than the outstanding balance of the demand',
+          'The request is more than the outstanding balance of the invoice',
           { outstanding_amount: fromMinor(out), requested_amount: fromMinor(amount) },
           'OPERATION_NOT_ALLOWED',
         );

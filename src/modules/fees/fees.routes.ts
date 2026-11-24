@@ -1,5 +1,6 @@
 import type { Request, Response } from 'express';
 import { z } from 'zod';
+import { sendPdf } from '../../http/pdf.js';
 import { defineRoute } from '../../http/route.js';
 import { actorFrom } from '../../platform/context.js';
 import type { AdjustmentService } from './adjustments.service.js';
@@ -748,10 +749,11 @@ export function feeRoutes(s: FeeServices) {
     defineRoute({
       method: 'post',
       path: '/fees/payments/:id/cancel',
-      summary: 'Cancel a payment recorded in error: reverses its allocations and voids its receipt',
+      summary:
+        'Cancel a payment recorded in error: reverses its allocations and voids its receipt (School Admin)',
       tags: T_PAY,
       access: 'tenant',
-      permissions: ['fees.payments.verify'],
+      permissions: ['fees.payments.cancel'],
       params: IdParams,
       body: ReasonBody,
       handler: async ({ params, body, req }) => ({
@@ -833,18 +835,7 @@ export function feeRoutes(s: FeeServices) {
       permissions: ['fees.read'],
       params: IdParams,
       handler: async ({ params, req, res }) => {
-        const f = await documents.receiptPdf(caller(req), params.id);
-        res
-          .status(200)
-          .set({
-            'Content-Type': 'application/pdf',
-            'Content-Length': String(f.data.length),
-            'Content-Disposition': `inline; filename="${f.filename}"`,
-            'Cache-Control': 'private, no-store',
-            'X-Content-Type-Options': 'nosniff',
-          })
-          .end(f.data);
-        return undefined;
+        return sendPdf(res, await documents.receiptPdf(caller(req), params.id));
       },
     }),
     defineRoute({

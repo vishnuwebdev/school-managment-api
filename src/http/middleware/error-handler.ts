@@ -55,6 +55,21 @@ export function errorHandler(log: Logger): ErrorRequestHandler {
         return;
       }
     }
+    // A table the code needs isn't in the database: a migration hasn't been
+    // applied. Say so instead of a bare 500 (no data leaks: only the table name).
+    const missing = missingTable(err);
+    if (missing) {
+      log.error({ err, requestId }, `Missing table ${missing}: run npm run db:migrate`);
+      res.status(503).json({
+        error: {
+          code: 'DATABASE_NOT_MIGRATED',
+          message: `The database is not up to date (table "${missing}" is missing). Run "npm run db:migrate" for the API and try again.`,
+          details: { table: missing },
+          request_id: requestId,
+        },
+      });
+      return;
+    }
     log.error({ err, requestId }, 'Unhandled error');
     res.status(500).json({
       error: {
@@ -65,4 +80,17 @@ export function errorHandler(log: Logger): ErrorRequestHandler {
       },
     });
   };
+}
+
+/** The table name when [err] (or its cause, as Drizzle wraps driver errors) is MySQL ER_NO_SUCH_TABLE. */
+function missingTable(err: unknown): string | null {
+  for (let e = err, depth = 0; e && typeof e === 'object' && depth < 4; e = (e as { cause?: unknown }).cause, depth++) {
+    const x = e as { code?: unknown; sqlMessage?: unknown; message?: unknown };
+    if (x.code === 'ER_NO_SUCH_TABLE') {
+      const text = String(x.sqlMessage ?? x.message ?? '');
+      const m = /Table '(?:[^.']+\.)?([^']+)' doesn't exist/.exec(text);
+      return m?.[1] ?? 'unknown';
+    }
+  }
+  return null;
 }

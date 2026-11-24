@@ -31,8 +31,16 @@ import {
 export async function seedCatalog(db: Database) {
   await db.transaction(async (tx) => {
     // ---- Features & dependencies
-    const knownFeatureCodes = new Set(
-      (await tx.select({ code: features.code }).from(features)).map((r) => r.code),
+    const featuresBefore = await tx
+      .select({ code: features.code, status: features.status })
+      .from(features);
+    const knownFeatureCodes = new Set(featuresBefore.map((r) => r.code));
+    const catalogCodes = new Set(FEATURES.map((f) => f.code as string));
+    // Codes this run retires (still ACTIVE in the database, gone from the catalog).
+    const retiring = new Set(
+      featuresBefore
+        .filter((r) => r.status === 'ACTIVE' && !catalogCodes.has(r.code))
+        .map((r) => r.code),
     );
     for (const [i, f] of FEATURES.entries()) {
       const def = f as (typeof FEATURES)[number] & {
@@ -71,6 +79,34 @@ export async function seedCatalog(db: Database) {
       })),
     );
     if (deps.length) await tx.insert(featureDependencies).values(deps);
+    // Features dropped from the catalog (e.g. leave) are archived.
+    await tx
+      .update(features)
+      .set({ status: 'ARCHIVED' })
+      .where(
+        notInArray(
+          features.code,
+          FEATURES.map((f) => f.code as string),
+        ),
+      );
+
+    // An archived feature is sold by no plan and granted to no school, by plan or by override
+    // (the entitlement rows stay as REVOKED history).
+    const archivedFeatureIds = featureRows
+      .filter((r) => !catalogCodes.has(r.code))
+      .map((r) => r.id);
+    if (archivedFeatureIds.length) {
+      await tx.delete(planFeatures).where(inArray(planFeatures.featureId, archivedFeatureIds));
+      await tx
+        .update(entitlements)
+        .set({ status: 'REVOKED', endsAt: new Date() })
+        .where(
+          and(
+            inArray(entitlements.featureId, archivedFeatureIds),
+            eq(entitlements.status, 'ACTIVE'),
+          ),
+        );
+    }
 
     // ---- Permissions (codes are never deleted; removed ones are archived)
     for (const [i, p] of PERMISSIONS.entries()) {
@@ -133,6 +169,30 @@ export async function seedCatalog(db: Database) {
         await tx
           .insert(rolePermissions)
           .values(wanted.map((pid) => ({ roleId: role!.id, permissionId: pid })));
+    }
+
+    // System roles dropped from the catalog (e.g. Librarian) are archived: hidden from role
+    // lists and assignment, holding no permissions, and their assignments are ended.
+    const retiredRoles = await tx
+      .select({ id: roles.id })
+      .from(roles)
+      .where(
+        and(
+          eq(roles.tenantKey, 'SYSTEM'),
+          notInArray(
+            roles.code,
+            SYSTEM_ROLES.map((r) => r.code),
+          ),
+        ),
+      );
+    if (retiredRoles.length) {
+      const ids = retiredRoles.map((r) => r.id);
+      await tx.update(roles).set({ status: 'ARCHIVED' }).where(inArray(roles.id, ids));
+      await tx.delete(rolePermissions).where(inArray(rolePermissions.roleId, ids));
+      await tx
+        .update(roleAssignments)
+        .set({ status: 'REVOKED', endsAt: new Date() })
+        .where(and(inArray(roleAssignments.roleId, ids), eq(roleAssignments.status, 'ACTIVE')));
     }
 
     // ---- Plans. Created once (version 1); after that the super admin owns name,
@@ -198,6 +258,35 @@ export async function seedCatalog(db: Database) {
         null,
       );
     }
+
+    // One-time, in the run that retires the unbuilt features (M14, 2026-11-09): every plan
+    // version, including plans the Super Admin made, gets the Teacher mobile app (M10). Plans
+    // are owned by the Super Admin afterwards, so later runs never re-add it.
+    const allVersions = await tx.select({ id: planVersions.id }).from(planVersions);
+    if (retiring.has('library') && featureId.get('teachers.mobile_app')) {
+      const app = featureId.get('teachers.mobile_app')!;
+      const have = new Set(
+        (
+          await tx
+            .select({ v: planFeatures.planVersionId })
+            .from(planFeatures)
+            .where(eq(planFeatures.featureId, app))
+        ).map((r) => r.v),
+      );
+      const missing = allVersions.filter((v) => !have.has(v.id));
+      if (missing.length)
+        await tx
+          .insert(planFeatures)
+          .values(missing.map((v) => ({ planVersionId: v.id, featureId: app })));
+    }
+    // Schools follow their plan at once: grant what plans gained, revoke retired features.
+    if (retiring.size)
+      await syncPlanVersionEntitlements(
+        tx,
+        allVersions.map((v) => v.id),
+        now,
+        null,
+      );
 
     // Schools that already had custom roles keep the ability to manage them when
     // Custom roles first becomes a separate feature.

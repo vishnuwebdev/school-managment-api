@@ -67,7 +67,14 @@ const sendPasswordReset: EventHandler = {
       .from(passwordResetTokens)
       .innerJoin(users, eq(users.id, passwordResetTokens.userId))
       .where(eq(passwordResetTokens.id, resetId));
-    if (!row || row.reset.status !== 'PENDING' || row.reset.expiresAt <= deps.clock.now()) return;
+    // A login without an email (mobile only) cannot get a reset link; the school resets it.
+    if (
+      !row ||
+      !row.email ||
+      row.reset.status !== 'PENDING' ||
+      row.reset.expiresAt <= deps.clock.now()
+    )
+      return;
 
     const token = randomToken();
     const link = `${deps.env.APP_BASE_URL}/reset-password?token=${encodeURIComponent(token)}`;

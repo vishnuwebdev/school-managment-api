@@ -5,8 +5,19 @@
 export type ErrorCode =
   | 'AUTHENTICATION_REQUIRED'
   | 'INVALID_TOKEN'
+  | 'SESSION_EXPIRED'
+  | 'SIGNED_OUT_ELSEWHERE'
+  | 'SESSION_REVOKED'
   | 'INVALID_CREDENTIALS'
   | 'ACCOUNT_LOCKED'
+  | 'INVALID_PIN'
+  | 'PIN_NOT_SET'
+  | 'PIN_LOCKED'
+  | 'NOT_A_TEACHER'
+  | 'NOT_A_PARENT'
+  | 'ADMIN_PANEL_NOT_ALLOWED'
+  | 'TEACHER_APP_DISABLED'
+  | 'PARENT_APP_DISABLED'
   | 'ACCOUNT_DISABLED'
   | 'CONTEXT_SELECTION_REQUIRED'
   | 'PERMISSION_DENIED'
@@ -50,10 +61,16 @@ export class AuthenticationError extends AppError {
     code:
       | 'AUTHENTICATION_REQUIRED'
       | 'INVALID_TOKEN'
-      | 'INVALID_CREDENTIALS' = 'AUTHENTICATION_REQUIRED',
+      | 'SESSION_EXPIRED'
+      | 'SIGNED_OUT_ELSEWHERE'
+      | 'SESSION_REVOKED'
+      | 'INVALID_CREDENTIALS'
+      | 'INVALID_PIN'
+      | 'PIN_NOT_SET' = 'AUTHENTICATION_REQUIRED',
     message = 'Authentication is required',
+    details: unknown = null,
   ) {
-    super(401, code, message);
+    super(401, code, message, details);
   }
 }
 
@@ -69,6 +86,12 @@ export class AuthorizationError extends AppError {
       | 'SUBSCRIPTION_EXPIRED'
       | 'ACCOUNT_DISABLED'
       | 'ACCOUNT_LOCKED'
+      | 'PIN_LOCKED'
+      | 'NOT_A_TEACHER'
+      | 'NOT_A_PARENT'
+      | 'ADMIN_PANEL_NOT_ALLOWED'
+      | 'TEACHER_APP_DISABLED'
+      | 'PARENT_APP_DISABLED'
     > = 'PERMISSION_DENIED',
     message = 'You do not have permission to perform this operation',
     details: unknown = null,

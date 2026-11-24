@@ -96,21 +96,27 @@ export const SectionListQuery = PaginationQuery.extend({
 });
 
 // ---- Subjects
+/** The class phases a subject is for; null or empty = every phase. */
+const SubjectPhases = z.array(z.enum(CLASS_PHASE)).max(CLASS_PHASE.length).nullable();
 export const CreateSubjectBody = z.object({
   code: Code,
   name: Name(120),
   description: z.string().trim().max(500).nullable().optional(),
   subject_type: z.enum(SUBJECT_TYPE).default('CORE'),
+  phases: SubjectPhases.optional(),
 });
 export const UpdateSubjectBody = z.object({
   version: Version,
   name: Name(120).optional(),
   description: z.string().trim().max(500).nullable().optional(),
   subject_type: z.enum(SUBJECT_TYPE).optional(),
+  phases: SubjectPhases.optional(),
 });
 export const SubjectListQuery = PaginationQuery.extend({
   status: z.enum(SUBJECT_STATUS).optional(),
   subject_type: z.enum(SUBJECT_TYPE).optional(),
+  /** Subjects available to this phase: those made for it plus those for every phase. */
+  phase: z.enum(CLASS_PHASE).optional(),
 });
 
 // ---- Subject offerings

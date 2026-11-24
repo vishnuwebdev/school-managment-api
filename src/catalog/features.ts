@@ -2,6 +2,9 @@
  * Product capability catalog — the single source of truth for feature codes.
  * Seeded into `features` / `feature_dependencies`. Keep the hierarchy shallow
  * (feature → sub-feature). Dependencies are data, never hard-coded checks.
+ * List only features that have code: plans must never sell something unbuilt (library,
+ * transport, SMS, integrations, online payments and online results were removed 2026-11-09;
+ * the seed archives a removed code and takes it out of plans and school overrides).
  */
 export interface FeatureDef {
   code: string;
@@ -64,21 +67,30 @@ export const FEATURES = [
     name: 'Academic structure',
     description: 'Academic years, terms, classes, sections and subjects.',
   },
-  { code: 'teachers', name: 'Teacher & staff management' },
+  { code: 'teachers', name: 'Teacher management' },
   {
     code: 'teachers.portal',
     name: 'Teacher portal access',
-    description: 'Invite teachers and staff to sign in.',
+    description: 'Invite teachers to sign in.',
     parent: 'teachers',
     kind: 'capability',
     dependsOn: ['teachers'],
   },
   {
+    // Code kept from the old staff attendance so plans that had it keep it.
     code: 'teachers.staff_attendance',
-    name: 'Staff attendance',
-    description: 'Mark and view teacher and staff attendance.',
+    name: 'Teacher attendance',
+    description: 'Mark and view which days each teacher was present.',
     parent: 'teachers',
     kind: 'capability',
+    dependsOn: ['teachers'],
+  },
+  {
+    // Not a capability, so it is listed in each plan explicitly (every plan includes it).
+    code: 'teachers.mobile_app',
+    name: 'Teacher mobile app',
+    description: 'Teachers use the EduSphere Teacher app (iOS and Android).',
+    parent: 'teachers',
     dependsOn: ['teachers'],
   },
 
@@ -99,12 +111,6 @@ export const FEATURES = [
   },
 
   { code: 'examinations', name: 'Examinations & results', dependsOn: ['students', 'academics'] },
-  {
-    code: 'examinations.online_results',
-    name: 'Online results',
-    parent: 'examinations',
-    dependsOn: ['examinations', 'parent_portal'],
-  },
 
   { code: 'fees', name: 'Fee management', dependsOn: ['students'] },
   {
@@ -139,23 +145,10 @@ export const FEATURES = [
     kind: 'capability',
     dependsOn: ['fees'],
   },
-  {
-    code: 'fees.online_payments',
-    name: 'Online fee payments',
-    parent: 'fees',
-    dependsOn: ['fees'],
-  },
 
   { code: 'timetable', name: 'Timetable', dependsOn: ['academics', 'teachers'] },
-  { code: 'leave', name: 'Leave & staff availability', dependsOn: ['teachers'] },
 
   { code: 'communication', name: 'Communication & notices' },
-  {
-    code: 'communication.sms',
-    name: 'SMS delivery',
-    parent: 'communication',
-    dependsOn: ['communication'],
-  },
 
   {
     code: 'custom_roles',
@@ -164,10 +157,7 @@ export const FEATURES = [
       'Create, edit and archive the school’s own roles. Built-in roles and inviting users are always available.',
   },
   { code: 'parent_portal', name: 'Parent / guardian portal', dependsOn: ['students'] },
-  { code: 'library', name: 'Library', dependsOn: ['students'] },
-  { code: 'transport', name: 'Transportation', dependsOn: ['students'] },
   { code: 'reports', name: 'Reports & analytics' },
-  { code: 'integrations', name: 'Integrations & external systems' },
 ] as const satisfies readonly FeatureDef[];
 
 export type FeatureCode = (typeof FEATURES)[number]['code'];

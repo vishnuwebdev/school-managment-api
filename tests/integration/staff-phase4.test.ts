@@ -135,13 +135,13 @@ describe('extra staff fields', () => {
 
 describe('staff import', () => {
   const csv = (rows: string[]) =>
-    ['first_name,last_name,email,staff_type,joining_date', ...rows].join('\n') + '\n';
+    ['first_name,last_name,email,joining_date', ...rows].join('\n') + '\n';
 
   it('checks first, then imports everything or nothing', async () => {
     const tag = uniq('imp').toLowerCase();
     const good = csv([
-      `Ann,Import${tag},ann.${tag}@example.com,TEACHING,2026-01-05`,
-      `Bob,Import${tag},bob.${tag}@example.com,non-teaching,2026-01-06`,
+      `Ann,Import${tag},ann.${tag}@example.com,2026-01-05`,
+      `Bob,Import${tag},bob.${tag}@example.com,2026-01-06`,
     ]);
     const dry = await upload(api, '/teachers/import', good, 'text/csv');
     expect(dry.status, JSON.stringify(dry.body)).toBe(200);
@@ -156,8 +156,8 @@ describe('staff import', () => {
     expect(before.body.data).toHaveLength(0);
 
     const bad = csv([
-      `Cy,Import${tag},cy.${tag}@example.com,TEACHING,2026-01-05`,
-      `Di,Import${tag},not-an-email,TEACHING,2026-13-45`,
+      `Cy,Import${tag},cy.${tag}@example.com,2026-01-05`,
+      `Di,Import${tag},not-an-email,2026-13-45`,
     ]);
     const refused = await upload(api, '/teachers/import?commit=true', bad, 'text/csv');
     expect(refused.status).toBe(422);
@@ -181,8 +181,8 @@ describe('staff import', () => {
       api,
       '/teachers/import',
       csv([
-        `Eve,Rep${tag},eve.${tag}@example.com,TEACHING,`,
-        `Eva,Rep${tag},eve.${tag}@example.com,TEACHING,`,
+        `Eve,Rep${tag},eve.${tag}@example.com,`,
+        `Eva,Rep${tag},eve.${tag}@example.com,`,
       ]),
       'text/csv',
     );
@@ -210,7 +210,7 @@ describe('staff reports', () => {
     expect(dir.body.data.rows.length).toBeGreaterThan(0);
     const dept = await api.get('/staff-reports/by-department');
     expect(dept.status).toBe(200);
-    for (const r of ['qualifications', 'expiring-documents', 'leave-summary']) {
+    for (const r of ['qualifications', 'expiring-documents']) {
       const x = await api.get(`/staff-reports/${r}`);
       expect(x.status, r).toBe(200);
     }

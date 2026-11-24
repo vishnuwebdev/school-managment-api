@@ -94,7 +94,6 @@ export async function addTeacherHistory(
 export const presentTeacher = (t: TeacherRow) => ({
   id: t.id,
   teacher_number: t.teacherNumber,
-  staff_type: t.staffType,
   status: t.status,
   first_name: t.firstName,
   middle_name: t.middleName,

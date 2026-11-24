@@ -4,7 +4,7 @@ import { z } from 'zod';
 /** Password policy shared by every endpoint that sets a password. */
 export const PasswordSchema = z
   .string()
-  .min(10, 'Password must be at least 10 characters')
+  .min(6, 'Password must be at least 6 characters')
   .max(128, 'Password must be at most 128 characters')
   .refine((v) => /[A-Za-z]/.test(v) && /\d/.test(v), 'Password must contain letters and numbers');
 

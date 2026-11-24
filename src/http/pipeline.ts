@@ -10,6 +10,7 @@ import {
 } from '../modules/access/authorization.service.js';
 import { platformGrantsInSchool } from '../modules/access/scope-policy.js';
 import type { EntitlementService } from '../modules/entitlements/entitlements.service.js';
+import { sessionEnded } from '../modules/identity/session-end.js';
 import type { TokenService } from '../modules/identity/tokens.js';
 import type { Principal } from '../platform/context.js';
 import {
@@ -70,8 +71,16 @@ export function createPipeline(deps: Deps, svc: PipelineServices): Pipeline {
           gt(userSessions.expiresAt, now),
         ),
       );
-    if (!row)
-      throw new AuthenticationError('INVALID_TOKEN', 'The session has ended. Sign in again.');
+    if (!row) {
+      // Tell the client why (expired, signed out elsewhere, access removed).
+      const [ended] = await deps.db
+        .select({ revokedReason: userSessions.revokedReason, expiresAt: userSessions.expiresAt })
+        .from(userSessions)
+        .where(and(eq(userSessions.id, claims.sid), eq(userSessions.userId, claims.sub)));
+      if (!ended)
+        throw new AuthenticationError('INVALID_TOKEN', 'The session has ended. Sign in again.');
+      throw sessionEnded(ended.revokedReason, ended.expiresAt <= now);
+    }
     if (row.userStatus !== 'ACTIVE')
       throw new AuthorizationError('ACCOUNT_DISABLED', 'This account is not active');
     if (row.membershipStatus !== 'ACTIVE')
@@ -232,9 +241,18 @@ export function createPipeline(deps: Deps, svc: PipelineServices): Pipeline {
   }
 
   // ---- Permission + entitlement
-  const authorizeMw = (permissions: string[]): RequestHandler =>
+  const authorizeMw = (permissions: string[], features: string[] = []): RequestHandler =>
     handler(async (req, _res, next) => {
       authorize(req.ctx.principal!, req.ctx.tenant, permissions);
+      const tenant = req.ctx.tenant;
+      for (const feature of features) {
+        if (tenant && !tenant.entitlements.features.includes(feature))
+          throw new AuthorizationError(
+            'FEATURE_NOT_ENABLED',
+            'This feature is not enabled for your school',
+            { feature },
+          );
+      }
       next();
     });
 

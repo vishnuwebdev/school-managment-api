@@ -24,6 +24,7 @@ export const FILE_PURPOSE = [
   'STAFF_DOCUMENT',
   'STUDENT_CERTIFICATE',
   'PAYMENT_PROOF',
+  'NOTICE_ATTACHMENT',
 ] as const;
 export type FilePurpose = (typeof FILE_PURPOSE)[number];
 

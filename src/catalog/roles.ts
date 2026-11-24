@@ -4,6 +4,8 @@ import { expandPermissionPatterns } from './permissions.js';
  * System roles. These are starting bundles of permissions, not hard-coded
  * behaviour: code never checks role codes. Schools cannot edit system roles,
  * but can create custom roles (e.g. a "Sub Admin" with selected permissions).
+ * A role removed from this list is archived by the seed (its assignments stop granting
+ * anything); Librarian and Transport Manager were removed 2026-11-09 with their features.
  */
 export interface SystemRoleDef {
   code: string;
@@ -30,10 +32,7 @@ const TENANT_READ_ONLY = [
   'exams.read',
   'fees.read',
   'timetable.read',
-  'leave.read',
   'communication.read',
-  'library.read',
-  'transport.read',
   'reports.read',
 ];
 
@@ -153,8 +152,10 @@ export const SYSTEM_ROLES: SystemRoleDef[] = [
       'timetable.manage',
       'timetable.publish',
       'timetable.export',
-      'leave.approve',
       'communication.announcements.manage',
+      'feedback.read',
+      'feedback.respond',
+      'feedback.complaints',
       'students.admissions.approve',
       'students.enroll',
       'students.settings.manage',
@@ -170,7 +171,6 @@ export const SYSTEM_ROLES: SystemRoleDef[] = [
       'teachers.reports.read',
       'teachers.attendance.read',
       'teachers.attendance.mark',
-      'leave.types.manage',
       'teachers.export',
       'reports.export',
     ],
@@ -215,10 +215,11 @@ export const SYSTEM_ROLES: SystemRoleDef[] = [
       'attendance.correct',
       'exams.read',
       'exams.marks.enter',
+      'exams.remarks.write',
       'timetable.read',
-      'leave.read',
-      'leave.request',
       'communication.read',
+      'communication.notices.post',
+      'teacher_app.use',
     ],
   },
   {
@@ -240,21 +241,9 @@ export const SYSTEM_ROLES: SystemRoleDef[] = [
       'attendance.mark',
       'communication.read',
       'communication.announcements.manage',
+      'feedback.read',
+      'feedback.respond',
     ],
-  },
-  {
-    code: 'LIBRARIAN',
-    name: 'Librarian',
-    description: 'Library catalogue and circulation.',
-    scope: 'TENANT',
-    permissions: ['students.read', 'library.*', 'communication.read'],
-  },
-  {
-    code: 'TRANSPORT_MANAGER',
-    name: 'Transport Manager',
-    description: 'Routes, vehicles and student transport.',
-    scope: 'TENANT',
-    permissions: ['students.read', 'transport.*', 'communication.read'],
   },
   {
     code: 'PARENT',

@@ -15,6 +15,8 @@ import type {
   StudentHistoryQuery,
   TodayQuery,
 } from './attendance.schemas.js';
+import { dayOff, type CalendarSubject } from '../calendar/calendar.rules.js';
+import type { CalendarService } from '../calendar/calendar.service.js';
 import type { AttendanceConfigService } from './config.service.js';
 import {
   emptyCounts,
@@ -69,6 +71,7 @@ export class ReportService {
     private readonly deps: Deps,
     private readonly config: AttendanceConfigService,
     private readonly sessions: SessionService,
+    private readonly calendar: CalendarService,
   ) {}
 
   private get db() {
@@ -111,6 +114,16 @@ export class ReportService {
       .select()
       .from(academicYears)
       .where(and(eq(academicYears.tenantId, c.tenantId), eq(academicYears.isCurrent, true)));
+    // Why the day is off (weekly off or holiday): one settings and one holiday read for every section.
+    const [calSettings, holidays] = await Promise.all([
+      this.calendar.settings(c.tenantId),
+      this.calendar.activeHolidays(c.tenantId, date, date),
+    ]);
+    const offFor = (who: CalendarSubject) => {
+      const off = dayOff(calSettings, holidays, date, who);
+      return off ? { reason: off.reason, name: off.name } : null;
+    };
+    const schoolDayOff = offFor({ kind: 'students' });
     const totals = {
       sections: 0,
       not_started: 0,
@@ -121,7 +134,7 @@ export class ReportService {
       marked: 0,
       counts: emptyCounts(),
     };
-    if (!year) return { date, academic_year: null, totals, sections: [] };
+    if (!year) return { date, day_off: schoolDayOff, academic_year: null, totals, sections: [] };
     const conds: SQL[] = [
       sql`sec.tenant_id = ${c.tenantId}`,
       sql`sec.academic_year_id = ${year.id}`,
@@ -168,6 +181,11 @@ export class ReportService {
         group by e.section_id`,
     );
     const sizeOf = new Map(sizes.map((s) => [s.section_id, num(s.n)]));
+    const teacherOf = await this.classTeachers(c.tenantId);
+    const lastMark = await this.lastMarks(
+      c.tenantId,
+      data.map((r) => r.session_id as string | null).filter((id): id is string => !!id),
+    );
     const sections = data.map((r) => {
       const state = (r.session_id ? r.session_status : 'NOT_STARTED') as
         'NOT_STARTED' | 'DRAFT' | 'SUBMITTED' | 'FINAL';
@@ -199,14 +217,72 @@ export class ReportService {
         roster_size: rosterSize,
         marked_count: marked,
         counts,
+        day_off: offFor({
+          kind: 'class',
+          classId: String(r.class_id),
+          sectionId: String(r.section_id),
+        }),
+        class_teacher: teacherOf.get(String(r.section_id)) ?? null,
+        last_marked_by: lastMark.get(String(r.session_id))?.by ?? null,
+        last_marked_at: lastMark.get(String(r.session_id))?.at ?? null,
       };
     });
     return {
       date,
+      day_off: schoolDayOff,
       academic_year: { id: year.id, code: year.code },
       totals,
       sections,
     };
+  }
+
+  /** The active class teacher of each section: section id -> {id, name}. */
+  private async classTeachers(tenantId: string) {
+    const list = await rows<{ section_id: string; id: string; first: string; last: string }>(
+      this.db,
+      sql`select ct.section_id, t.id, t.first_name as first, t.last_name as last
+        from section_class_teachers ct
+        join teachers t on t.tenant_id = ct.tenant_id and t.id = ct.teacher_id
+        where ct.tenant_id = ${tenantId} and ct.status = 'ACTIVE'`,
+    );
+    return new Map(
+      list.map((t) => [t.section_id, { id: t.id, name: `${t.first} ${t.last ?? ''}`.trim() }]),
+    );
+  }
+
+  /**
+   * Who saved the latest mark of each register, and when: session id -> {by, at}.
+   * `by` is null when the user no longer exists.
+   */
+  private async lastMarks(tenantId: string, sessionIds: string[]) {
+    const out = new Map<string, { by: { id: string; name: string } | null; at: string }>();
+    if (sessionIds.length === 0) return out;
+    const ids = sql.join(
+      sessionIds.map((id) => sql`${id}`),
+      sql`, `,
+    );
+    const list = await rows<Row>(
+      this.db,
+      sql`select r.session_id, r.marked_by, r.marked_at, u.first_name as first, u.last_name as last
+        from attendance_records r
+        join (select session_id, max(marked_at) as m from attendance_records
+          where tenant_id = ${tenantId} and session_id in (${ids}) group by session_id) x
+          on x.session_id = r.session_id and x.m = r.marked_at
+        left join users u on u.id = r.marked_by
+        where r.tenant_id = ${tenantId}`,
+    );
+    for (const r of list) {
+      const id = String(r.session_id);
+      if (out.has(id)) continue;
+      const at = r.marked_at instanceof Date ? r.marked_at : new Date(`${String(r.marked_at)}Z`);
+      out.set(id, {
+        by: r.first
+          ? { id: String(r.marked_by), name: `${String(r.first)} ${String(r.last ?? '')}`.trim() }
+          : null,
+        at: at.toISOString(),
+      });
+    }
+    return out;
   }
 
   // ---- register / monthly (shared matrix) ------------------------------------------
@@ -404,6 +480,142 @@ export class ReportService {
         marked_count: marked,
         present_units: round2(present),
         absent_units: round2(absent),
+        percentage: percentage(present, marked),
+      },
+    };
+  }
+
+  /**
+   * The month as a simple grid: every student × every day of the month. A day is a
+   * holiday or weekly off for the class (HOLIDAY / OFF), the student's mark on that
+   * day's register (PRESENT, LATE, HALF_DAY, ABSENT, LEAVE — excused counts as leave —
+   * or OTHER), UPCOMING, or NOT_MARKED (a past school day with no mark for them).
+   * Day counts come from every register; the percentage uses final registers only,
+   * the one definition every report shares.
+   */
+  async monthGrid(c: Caller, q: z.infer<typeof MonthlyQuery>) {
+    await this.config.ensureDefaults(c.tenantId);
+    const { from, to } = monthRange(q.month);
+    const m = await this.matrix(c, q.section_id, from, to);
+    const today = await schoolToday(this.db, c.tenantId, this.deps.clock);
+    const cal = await this.calendar.workingDays(c.tenantId, from, to, {
+      kind: 'class',
+      classId: m.sec.sec.classId,
+      sectionId: m.sec.sec.id,
+    });
+    const offOn = new Map(cal.off_days.map((d) => [d.date, d]));
+    const sessionOn = new Map(m.sessions.map((s) => [s.date, s]));
+    const dates: string[] = [];
+    for (
+      let t = Date.parse(`${from}T00:00:00Z`);
+      t <= Date.parse(`${to}T00:00:00Z`);
+      t += 86_400_000
+    )
+      dates.push(new Date(t).toISOString().slice(0, 10));
+    const WEEKDAY = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const STATE: Record<string, string> = {
+      PRESENT: 'PRESENT',
+      LATE: 'LATE',
+      HALF_DAY: 'HALF_DAY',
+      ABSENT: 'ABSENT',
+      EXCUSED: 'LEAVE',
+      LEAVE: 'LEAVE',
+      OTHER: 'OTHER',
+    };
+    const students = m.students.map((s) => {
+      const counts = {
+        present: 0,
+        late: 0,
+        half_day: 0,
+        absent: 0,
+        leave: 0,
+        other: 0,
+        not_marked: 0,
+      };
+      let schoolDays = 0;
+      const days = dates.map((date) => {
+        const off = offOn.get(date);
+        if (off)
+          return {
+            date,
+            state: off.reason === 'HOLIDAY' ? 'HOLIDAY' : 'OFF',
+            status_code: null,
+            remarks: null,
+            final: false,
+          };
+        if (date <= today) schoolDays++;
+        const cell = s.cells[date];
+        if (cell) {
+          const state = STATE[cell.category] ?? 'OTHER';
+          const key = state.toLowerCase() as keyof typeof counts;
+          counts[key]++;
+          return {
+            date,
+            state,
+            status_code: cell.status_code,
+            remarks: cell.remarks,
+            final: cell.session_status === 'FINAL',
+          };
+        }
+        if (date > today)
+          return { date, state: 'UPCOMING', status_code: null, remarks: null, final: false };
+        counts.not_marked++;
+        return { date, state: 'NOT_MARKED', status_code: null, remarks: null, final: false };
+      });
+      return {
+        student: {
+          id: s.student.id,
+          student_number: s.student.student_number,
+          full_name: s.student.full_name,
+        },
+        days,
+        summary: {
+          school_days: schoolDays,
+          ...counts,
+          present_units: round2(s.present_units),
+          marked_count: s.marked,
+          percentage: percentage(s.present_units, s.marked),
+        },
+      };
+    });
+    let marked = 0;
+    let present = 0;
+    let absences = 0;
+    let notMarked = 0;
+    for (const s of students) {
+      marked += s.summary.marked_count;
+      present += s.summary.present_units;
+      absences += s.summary.absent;
+      notMarked += s.summary.not_marked;
+    }
+    const schoolDays = dates.filter((d) => !offOn.has(d) && d <= today).length;
+    return {
+      section: { id: m.sec.sec.id, code: m.sec.sec.code, name: m.sec.sec.name },
+      class: { id: m.sec.sec.classId, code: m.sec.classCode, name: m.sec.className },
+      month: q.month,
+      date_from: from,
+      date_to: to,
+      today,
+      partial: to > today,
+      days: dates.map((date) => {
+        const off = offOn.get(date);
+        const sess = sessionOn.get(date);
+        return {
+          date,
+          weekday: WEEKDAY[new Date(`${date}T00:00:00Z`).getUTCDay()]!,
+          off: off ? { reason: off.reason, name: off.name } : null,
+          future: date > today,
+          session_id: sess?.id ?? null,
+          session_status: sess?.status ?? null,
+        };
+      }),
+      students,
+      totals: {
+        students: students.length,
+        school_days: schoolDays,
+        registers_taken: m.sessions.filter((s) => !offOn.has(s.date)).length,
+        absences,
+        not_marked: notMarked,
         percentage: percentage(present, marked),
       },
     };

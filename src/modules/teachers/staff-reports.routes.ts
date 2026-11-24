@@ -15,7 +15,7 @@ export function staffReportRoutes(svc: StaffReportService) {
       method: 'get',
       path: '/staff-reports/:report',
       summary:
-        'Staff report: directory, by-department, qualifications, expiring-documents or leave-summary. ?format=csv downloads it.',
+        'Teacher report: directory, by-department, qualifications or expiring-documents. ?format=csv downloads it.',
       tags: ['School · Staff reports'],
       access: 'tenant',
       permissions: ['teachers.reports.read'],

@@ -192,7 +192,7 @@ export function attendanceRoutes(
       method: 'get',
       path: '/attendance/today',
       summary:
-        "Per-section state of the day's DAILY register (NOT_STARTED / DRAFT / SUBMITTED / FINAL) with counts, for the active year",
+        "Per-section state of the day's DAILY register (NOT_STARTED / DRAFT / SUBMITTED / FINAL) with counts, for the active year. Also per section: day_off {reason, name} | null, class_teacher, last_marked_by / last_marked_at; and the whole school's day_off",
       tags: TAG_R,
       access: 'tenant',
       permissions: ['attendance.read'],
@@ -229,6 +229,17 @@ export function attendanceRoutes(
       permissions: ['attendance.read'],
       query: MonthlyQuery,
       handler: async ({ query, req }) => ({ data: await reports.monthly(caller(req), query) }),
+    }),
+    defineRoute({
+      method: 'get',
+      path: '/attendance/reports/month-grid',
+      summary:
+        'One section, one month as a grid: every student × every day (marks, holidays, weekly offs, gaps) with totals',
+      tags: TAG_R,
+      access: 'tenant',
+      permissions: ['attendance.read'],
+      query: MonthlyQuery,
+      handler: async ({ query, req }) => ({ data: await reports.monthGrid(caller(req), query) }),
     }),
     defineRoute({
       method: 'get',

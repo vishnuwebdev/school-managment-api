@@ -1,24 +1,18 @@
-import { and, eq, sql, type SQL } from 'drizzle-orm';
+import { and, eq, inArray, sql, type SQL } from 'drizzle-orm';
 import type { Executor } from '../../db/client.js';
 import {
   academicClasses,
   academicSections,
   academicYears,
-  subjectOfferings,
-  subjects,
-  teachers,
-  teachingAssignments,
-  timetableEntries,
+  timetableDayOverrides,
   timetablePeriods,
-  timetables,
   timetableSettings,
   timetableVenues,
 } from '../../db/schema/index.js';
 import type { Principal } from '../../platform/context.js';
-import { AuthorizationError, NotFoundError } from '../../shared/errors.js';
-import { fullName } from '../teachers/support.js';
+import { AuthorizationError, BusinessRuleError, NotFoundError } from '../../shared/errors.js';
 import { hasTenantWideScope } from '../access/authorization.service.js';
-import { placementScope, sectionInScope } from '../attendance/support.js';
+import { sectionInScope } from '../attendance/support.js';
 
 export {
   placementScope,
@@ -56,47 +50,21 @@ export const addDays = (iso: string, n: number) =>
   new Date(Date.parse(`${iso}T00:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10);
 
 export type PeriodRow = typeof timetablePeriods.$inferSelect;
+export type OverrideRow = typeof timetableDayOverrides.$inferSelect;
 export type VenueRow = typeof timetableVenues.$inferSelect;
-export type TimetableRow = typeof timetables.$inferSelect;
-export type EntryRow = typeof timetableEntries.$inferSelect;
 export type SettingsRow = typeof timetableSettings.$inferSelect;
 
-export const periodPresent = (p: PeriodRow) => ({
-  id: p.id,
-  code: p.code,
-  name: p.name,
-  start_time: hhmm(p.startTime),
-  end_time: hhmm(p.endTime),
-  kind: p.kind,
-  is_teaching: p.kind === 'LESSON',
-  display_order: p.displayOrder,
-  class_id: p.academicClassId,
-  section_id: p.academicSectionId,
-  scope: p.academicSectionId ? 'SECTION' : p.academicClassId ? 'CLASS' : 'SCHOOL',
-  status: p.status,
-  version: p.version,
-  created_at: p.createdAt.toISOString(),
-  updated_at: p.updatedAt.toISOString(),
-});
+/** Whether a period runs on ISO weekday [day] (NULL days = every working day). */
+export const runsOn = (p: { daysOfWeek: number[] | null }, day: number) =>
+  !p.daysOfWeek || p.daysOfWeek.length === 0 || p.daysOfWeek.includes(day);
 
-/**
- * The periods that apply to a section: its own if it has any active ones, else its
- * class's, else the whole school's. A class that has its own periods does not also
- * use the school's, so the days never mix.
- */
-export function periodsForSection(
-  all: PeriodRow[],
-  section: { id: string; classId: string },
-): PeriodRow[] {
-  const active = all.filter((p) => p.status === 'ACTIVE');
-  const own = active.filter((p) => p.academicSectionId === section.id);
-  if (own.length) return own;
-  const ofClass = active.filter(
-    (p) => !p.academicSectionId && p.academicClassId === section.classId,
-  );
-  if (ofClass.length) return ofClass;
-  return active.filter((p) => !p.academicSectionId && !p.academicClassId);
-}
+/** Whether two periods share at least one weekday (NULL = every day). */
+export const daysOverlap = (a: number[] | null, b: number[] | null) =>
+  !a || !b || a.length === 0 || b.length === 0 || a.some((d) => b.includes(d));
+
+/** Sorted unique weekdays, or null for "every working day". */
+export const normalizeDays = (days: number[] | null | undefined): number[] | null =>
+  days && days.length ? [...new Set(days)].sort((x, y) => x - y) : null;
 
 export const venuePresent = (v: VenueRow) => ({
   id: v.id,
@@ -119,7 +87,11 @@ export const settingsPresent = (s: SettingsRow) => ({
   updated_at: s.updatedAt.toISOString(),
 });
 
-/** Locking read of the school's timetable settings; also the lock that serialises period changes. */
+/**
+ * Read of the school's timetable settings. With `update` it is also THE lock
+ * that serialises every timetable write of the school, so clash checks (which
+ * look at the whole year) never race each other.
+ */
 export async function readSettings(
   ex: Executor,
   tenantId: string,
@@ -132,9 +104,8 @@ export async function readSettings(
 }
 
 /**
- * Whole-timetable operations (create, publish, archive, clash report, workload)
- * need a tenant-wide grant of the permission; a narrower (section/class) grant
- * cannot be applied to them and is refused rather than silently widened.
+ * School-wide operations (the School default day, copying a year, workload)
+ * need a tenant-wide grant; a section/class grant is refused rather than widened.
  */
 export function requireWide(principal: Principal, permission: string) {
   if (!hasTenantWideScope(principal, permission))
@@ -144,31 +115,68 @@ export function requireWide(principal: Principal, permission: string) {
     );
 }
 
-/**
- * Load a timetable of this school, or 404. Drafts are work in progress: only
- * holders of `timetable.manage` or `timetable.publish` can see them; for everyone else they do not exist.
- */
-export async function loadTimetable(
-  ex: Executor,
-  tenantId: string,
-  id: string,
-  principal: Principal,
-  opts: { lock?: 'update' | 'share'; hideDraft?: boolean } = {},
-): Promise<TimetableRow> {
+export async function loadYear(ex: Executor, tenantId: string, id: string, lock?: 'update') {
   const q = ex
     .select()
-    .from(timetables)
-    .where(and(eq(timetables.id, id), eq(timetables.tenantId, tenantId)));
-  const [row] = await (opts.lock ? q.for(opts.lock) : q);
-  if (!row) throw new NotFoundError('Timetable');
-  if (
-    opts.hideDraft !== false &&
-    row.status === 'DRAFT' &&
-    !principal.permissions.has('timetable.manage') &&
-    !principal.permissions.has('timetable.publish')
-  )
-    throw new NotFoundError('Timetable');
+    .from(academicYears)
+    .where(and(eq(academicYears.id, id), eq(academicYears.tenantId, tenantId)));
+  const [row] = await (lock ? q.for(lock) : q);
+  if (!row) throw new NotFoundError('Academic year');
   return row;
+}
+
+/** The school's current academic year, or null. */
+export async function currentYearId(ex: Executor, tenantId: string) {
+  const [y] = await ex
+    .select({ id: academicYears.id })
+    .from(academicYears)
+    .where(and(eq(academicYears.tenantId, tenantId), eq(academicYears.isCurrent, true)));
+  return y?.id ?? null;
+}
+
+// ---- owners: whose school day ---------------------------------------------------------
+
+/**
+ * Whose school day a period belongs to: one section, or a whole class that has
+ * no sections in the year. (The School default day has no owner.)
+ */
+export interface Owner {
+  kind: 'SECTION' | 'CLASS';
+  sectionId: string | null;
+  classId: string;
+  yearId: string;
+  /** "Class 7 Section A" / "Nursery". */
+  title: string;
+  className: string;
+  classCode: string;
+  sectionName: string | null;
+  sectionCode: string | null;
+}
+
+/** Occupancy / grouping key of an owner: the section id, or `C<class id>:<year id>`. */
+export const ownerKey = (o: { sectionId: string | null; classId: string; yearId: string }) =>
+  o.sectionId ?? `C${o.classId}:${o.yearId}`;
+
+/** Whether the class is split into (active or draft) sections in the year. */
+export async function classHasSections(
+  ex: Executor,
+  tenantId: string,
+  classId: string,
+  academicYearId: string,
+) {
+  const [s] = await ex
+    .select({ id: academicSections.id })
+    .from(academicSections)
+    .where(
+      and(
+        eq(academicSections.tenantId, tenantId),
+        eq(academicSections.classId, classId),
+        eq(academicSections.academicYearId, academicYearId),
+        inArray(academicSections.status, ['ACTIVE', 'DRAFT']),
+      ),
+    )
+    .limit(1);
+  return !!s;
 }
 
 /** A section the principal may access for `permission`, or 404 (other schools' ids and out-of-scope sections alike). */
@@ -199,218 +207,93 @@ export async function loadSection(
   return row;
 }
 
-// ---- entry views ---------------------------------------------------------------------
-
-const entrySelection = {
-  e: timetableEntries,
-  p: timetablePeriods,
-  s: {
-    id: academicSections.id,
-    code: academicSections.code,
-    name: academicSections.name,
-    status: academicSections.status,
-    classId: academicSections.classId,
-  },
-  c: { id: academicClasses.id, code: academicClasses.code, name: academicClasses.name },
-  o: {
-    status: subjectOfferings.status,
-    classId: subjectOfferings.classId,
-    sectionId: subjectOfferings.sectionId,
-    academicYearId: subjectOfferings.academicYearId,
-  },
-  sub: { id: subjects.id, code: subjects.code, name: subjects.name },
-  a: {
-    status: teachingAssignments.status,
-    teacherId: teachingAssignments.teacherId,
-    subjectOfferingId: teachingAssignments.subjectOfferingId,
-  },
-  t: {
-    id: teachers.id,
-    teacherNumber: teachers.teacherNumber,
-    firstName: teachers.firstName,
-    middleName: teachers.middleName,
-    lastName: teachers.lastName,
-    status: teachers.status,
-  },
-  v: {
-    id: timetableVenues.id,
-    code: timetableVenues.code,
-    name: timetableVenues.name,
-    status: timetableVenues.status,
-    capacity: timetableVenues.capacity,
-  },
-};
-
-export interface EntryJoined {
-  e: EntryRow;
-  p: PeriodRow;
-  s: { id: string; code: string; name: string; status: string; classId: string };
-  c: { id: string; code: string; name: string };
-  o: { status: string; classId: string; sectionId: string | null; academicYearId: string };
-  sub: { id: string; code: string; name: string };
-  a: { status: string; teacherId: string; subjectOfferingId: string };
-  t: {
-    id: string;
-    teacherNumber: string;
-    firstName: string;
-    middleName: string | null;
-    lastName: string;
-    status: string;
-  };
-  /** Drizzle returns null for the whole group when the LEFT JOIN finds no venue. */
-  v: { id: string; code: string; name: string; status: string; capacity: number | null } | null;
-}
-
-/** entry ⋈ period ⋈ section ⋈ class ⋈ offering ⋈ subject ⋈ assignment ⋈ teacher ⟕ venue, ready for `.where()`. */
-export function entryQuery(ex: Executor) {
-  const t = timetableEntries;
-  return ex
-    .select(entrySelection)
-    .from(t)
-    .innerJoin(
-      timetablePeriods,
-      and(eq(timetablePeriods.tenantId, t.tenantId), eq(timetablePeriods.id, t.periodId)),
-    )
-    .innerJoin(
-      academicSections,
-      and(eq(academicSections.tenantId, t.tenantId), eq(academicSections.id, t.sectionId)),
-    )
-    .innerJoin(academicClasses, eq(academicClasses.id, academicSections.classId))
-    .innerJoin(
-      subjectOfferings,
-      and(eq(subjectOfferings.tenantId, t.tenantId), eq(subjectOfferings.id, t.subjectOfferingId)),
-    )
-    .innerJoin(subjects, eq(subjects.id, subjectOfferings.subjectId))
-    .innerJoin(
-      teachingAssignments,
-      and(
-        eq(teachingAssignments.tenantId, t.tenantId),
-        eq(teachingAssignments.id, t.teachingAssignmentId),
-      ),
-    )
-    .innerJoin(teachers, and(eq(teachers.tenantId, t.tenantId), eq(teachers.id, t.teacherId)))
-    .leftJoin(
-      timetableVenues,
-      and(eq(timetableVenues.tenantId, t.tenantId), eq(timetableVenues.id, t.venueId)),
-    );
-}
-
-export const ENTRY_ORDER = [
-  sql`${timetableEntries.dayOfWeek}`,
-  sql`${timetablePeriods.startTime}`,
-  sql`${academicClasses.code}`,
-  sql`${academicSections.code}`,
-  sql`${timetableEntries.id}`,
-];
-
-export async function fetchEntries(
+/**
+ * A class that has no (open) sections in [academicYearId]. 404 when missing or
+ * out of scope; 422 CLASS_HAS_SECTIONS when the class is split into sections
+ * (its school day then belongs to each section).
+ */
+export async function loadClassOwner(
   ex: Executor,
-  where: SQL | undefined,
-  lock?: 'share' | 'update',
-): Promise<EntryJoined[]> {
-  const q = entryQuery(ex)
-    .where(where)
-    .orderBy(...ENTRY_ORDER);
-  return (await (lock ? q.for(lock) : q)) as EntryJoined[];
-}
-
-export function presentEntry(r: EntryJoined) {
-  return {
-    id: r.e.id,
-    timetable_id: r.e.timetableId,
-    day_of_week: r.e.dayOfWeek,
-    day_name: DAY_NAMES[r.e.dayOfWeek],
-    period: {
-      id: r.p.id,
-      code: r.p.code,
-      name: r.p.name,
-      start_time: hhmm(r.p.startTime),
-      end_time: hhmm(r.p.endTime),
-    },
-    section: {
-      id: r.s.id,
-      code: r.s.code,
-      name: r.s.name,
-      class: { id: r.c.id, code: r.c.code, name: r.c.name },
-    },
-    subject: r.sub,
-    subject_offering_id: r.e.subjectOfferingId,
-    teaching_assignment_id: r.e.teachingAssignmentId,
-    teacher: {
-      id: r.t.id,
-      teacher_number: r.t.teacherNumber,
-      full_name: fullName(r.t),
-    },
-    venue: r.v ? { id: r.v.id, code: r.v.code, name: r.v.name } : null,
-    status: r.e.status,
-    version: r.e.version,
-    created_at: r.e.createdAt.toISOString(),
-    updated_at: r.e.updatedAt.toISOString(),
-  };
-}
-export type EntryView = ReturnType<typeof presentEntry>;
-
-/** Row-level read/export scope on the joined entry query. */
-export const entryScope = (principal: Principal, permission: string) =>
-  placementScope(principal, permission, {
-    section: timetableEntries.sectionId,
-    klass: academicSections.classId,
-  });
-
-export async function loadYear(ex: Executor, tenantId: string, id: string, lock?: 'update') {
+  tenantId: string,
+  classId: string,
+  academicYearId: string,
+  principal: Principal,
+  permission: string,
+  lock?: 'share',
+) {
   const q = ex
-    .select()
-    .from(academicYears)
-    .where(and(eq(academicYears.id, id), eq(academicYears.tenantId, tenantId)));
+    .select({
+      id: academicClasses.id,
+      code: academicClasses.code,
+      name: academicClasses.name,
+      status: academicClasses.status,
+    })
+    .from(academicClasses)
+    .where(and(eq(academicClasses.id, classId), eq(academicClasses.tenantId, tenantId)));
   const [row] = await (lock ? q.for(lock) : q);
-  if (!row) throw new NotFoundError('Academic year');
+  if (!row || !sectionInScope(principal, permission, { id: '', classId: row.id }))
+    throw new NotFoundError('Class');
+  if (await classHasSections(ex, tenantId, classId, academicYearId))
+    throw new BusinessRuleError(
+      'OPERATION_NOT_ALLOWED',
+      `${row.name} has sections: set up the timetable of each section instead`,
+      { reason: 'CLASS_HAS_SECTIONS', class_id: classId },
+    );
   return row;
 }
 
-/** Number of entries per timetable, for list and detail pages. */
-export async function entryCounts(ex: Executor, tenantId: string, ids: string[]) {
-  const out = new Map<string, number>();
-  if (!ids.length) return out;
-  const res = await ex
-    .select({ id: timetableEntries.timetableId, n: sql<number>`count(*)` })
-    .from(timetableEntries)
-    .where(
-      and(
-        eq(timetableEntries.tenantId, tenantId),
-        sql`${timetableEntries.timetableId} in (${sql.join(
-          ids.map((i) => sql`${i}`),
-          sql`, `,
-        )})`,
-      ),
-    )
-    .groupBy(timetableEntries.timetableId);
-  for (const r of res) out.set(r.id, Number(r.n));
-  return out;
+/**
+ * Resolve `{section_id}` or `{class_id, academic_year_id}` to an owner the
+ * principal may use for `permission`. A section's year is its own; a class
+ * defaults to the current academic year.
+ */
+export async function resolveOwner(
+  ex: Executor,
+  tenantId: string,
+  input: { section_id?: string; class_id?: string; academic_year_id?: string },
+  principal: Principal,
+  permission: string,
+  lock?: 'share',
+): Promise<Owner> {
+  if (input.section_id) {
+    const s = await loadSection(ex, tenantId, input.section_id, principal, permission, lock);
+    return {
+      kind: 'SECTION',
+      sectionId: s.id,
+      classId: s.classId,
+      yearId: s.academicYearId,
+      title: `${s.className} ${s.name}`.trim(),
+      className: s.className,
+      classCode: s.classCode,
+      sectionName: s.name,
+      sectionCode: s.code,
+    };
+  }
+  if (!input.class_id) throw new NotFoundError('Section');
+  const yearId = input.academic_year_id ?? (await currentYearId(ex, tenantId));
+  if (!yearId) throw new NotFoundError('Academic year');
+  await loadYear(ex, tenantId, yearId);
+  const c = await loadClassOwner(ex, tenantId, input.class_id, yearId, principal, permission, lock);
+  return {
+    kind: 'CLASS',
+    sectionId: null,
+    classId: c.id,
+    yearId,
+    title: c.name,
+    className: c.name,
+    classCode: c.code,
+    sectionName: null,
+    sectionCode: null,
+  };
 }
 
-export const presentTimetable = (
-  t: TimetableRow,
-  year: { id: string; code: string; name: string },
-  entryCount: number,
-) => ({
-  id: t.id,
-  academic_year: { id: year.id, code: year.code, name: year.name },
-  name: t.name,
-  status: t.status,
-  version_no: t.versionNo,
-  effective_from: t.effectiveFrom,
-  effective_to: t.effectiveTo,
-  notes: t.notes,
-  copied_from_id: t.copiedFromId,
-  superseded_by_id: t.supersededById,
-  published_at: t.publishedAt?.toISOString() ?? null,
-  archived_at: t.archivedAt?.toISOString() ?? null,
-  entry_count: entryCount,
-  version: t.version,
-  created_at: t.createdAt.toISOString(),
-  updated_at: t.updatedAt.toISOString(),
-});
-export type TimetableView = ReturnType<typeof presentTimetable>;
+/** SQL filter for the periods of an owner (or the School default day when null). */
+export const ownerFilter = (owner: Owner | null): SQL =>
+  owner === null
+    ? sql`${timetablePeriods.academicClassId} is null and ${timetablePeriods.academicSectionId} is null`
+    : owner.sectionId
+      ? sql`${timetablePeriods.academicSectionId} = ${owner.sectionId}`
+      : sql`${timetablePeriods.academicSectionId} is null and ${timetablePeriods.academicClassId} = ${owner.classId} and ${timetablePeriods.academicYearId} = ${owner.yearId}`;
 
 export const inList = (col: SQL | Parameters<typeof eq>[0], ids: string[]) =>
   sql`${col} in (${sql.join(

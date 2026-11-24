@@ -2,14 +2,11 @@ import { and, asc, eq, inArray, isNull, lte, sql, type SQL } from 'drizzle-orm';
 import { z } from 'zod';
 import type { Deps } from '../../container.js';
 import {
-  leaveRequests,
-  leaveTypes,
   staffDocuments,
   staffDocumentTypes,
   teacherQualifications,
   teachers,
   TEACHER_STATUS,
-  STAFF_TYPE,
 } from '../../db/schema/index.js';
 import type { Actor, Principal } from '../../platform/context.js';
 import { recordChange } from '../../platform/record.js';
@@ -25,7 +22,6 @@ export const STAFF_REPORTS = [
   'by-department',
   'qualifications',
   'expiring-documents',
-  'leave-summary',
 ] as const;
 export type StaffReport = (typeof STAFF_REPORTS)[number];
 
@@ -33,12 +29,9 @@ export const StaffReportParams = z.object({ report: z.enum(STAFF_REPORTS) });
 export const StaffReportQuery = z.object({
   format: z.enum(['json', 'csv']).default('json'),
   status: z.enum(TEACHER_STATUS).optional(),
-  staff_type: z.enum(STAFF_TYPE).optional(),
   department: z.string().trim().min(1).max(100).optional(),
   /** expiring-documents: how far ahead to look (default 60 days). */
   days: z.coerce.number().int().min(1).max(365).default(60),
-  /** leave-summary: calendar year (default this year). */
-  year: z.coerce.number().int().min(2000).max(2100).optional(),
 });
 
 export interface ReportTable {
@@ -51,7 +44,7 @@ export interface ReportTable {
 
 const LIVE = ['ACTIVE', 'ON_LEAVE', 'ONBOARDING'] as const;
 
-/** Tabular staff reports. One shape (columns + rows) so the app and the CSV share one renderer. */
+/** Tabular teacher reports. One shape (columns + rows) so the app and the CSV share one renderer. */
 export class StaffReportService {
   constructor(private readonly deps: Deps) {}
 
@@ -67,9 +60,9 @@ export class StaffReportService {
     actor: Actor,
   ): Promise<ReportTable | string> {
     if (!hasTenantWideScope(principal, 'teachers.reports.read'))
-      throw new AuthorizationError('PERMISSION_DENIED', 'Staff reports need school-wide access');
+      throw new AuthorizationError('PERMISSION_DENIED', 'Teacher reports need school-wide access');
     if (q.format === 'csv' && !hasTenantWideScope(principal, 'teachers.export'))
-      throw new AuthorizationError('PERMISSION_DENIED', 'You cannot export staff data');
+      throw new AuthorizationError('PERMISSION_DENIED', 'You cannot export teacher data');
     const table = await this.build(tenantId, report, q);
     if (q.format === 'json') return table;
     await this.db.transaction(async (tx) => {
@@ -92,7 +85,6 @@ export class StaffReportService {
     return and(
       eq(teachers.tenantId, tenantId),
       q.status ? eq(teachers.status, q.status) : undefined,
-      q.staff_type ? eq(teachers.staffType, q.staff_type) : undefined,
       q.department ? eq(teachers.department, q.department) : undefined,
     )!;
   }
@@ -112,11 +104,10 @@ export class StaffReportService {
           .orderBy(asc(teachers.lastName), asc(teachers.firstName));
         return {
           ...base,
-          title: 'Staff directory',
+          title: 'Teacher directory',
           columns: [
-            { key: 'teacher_number', label: 'Staff no.' },
+            { key: 'teacher_number', label: 'Teacher no.' },
             { key: 'name', label: 'Name' },
-            { key: 'staff_type', label: 'Type' },
             { key: 'status', label: 'Status' },
             { key: 'department', label: 'Department' },
             { key: 'designation', label: 'Designation' },
@@ -128,7 +119,6 @@ export class StaffReportService {
           rows: rows.map((t) => ({
             teacher_number: t.teacherNumber,
             name: fullName(t),
-            staff_type: t.staffType,
             status: t.status,
             department: t.department,
             designation: t.designation,
@@ -143,37 +133,21 @@ export class StaffReportService {
         const rows = await this.db
           .select({
             department: teachers.department,
-            staffType: teachers.staffType,
             n: sql<number>`count(*)`.mapWith(Number),
           })
           .from(teachers)
           .where(and(eq(teachers.tenantId, tenantId), inArray(teachers.status, [...LIVE])))
-          .groupBy(teachers.department, teachers.staffType);
-        const byDept = new Map<string, { teaching: number; non: number }>();
-        for (const r of rows) {
-          const key = r.department ?? '(No department)';
-          const cur = byDept.get(key) ?? { teaching: 0, non: 0 };
-          if (r.staffType === 'TEACHING') cur.teaching += r.n;
-          else cur.non += r.n;
-          byDept.set(key, cur);
-        }
+          .groupBy(teachers.department);
         return {
           ...base,
-          title: 'Staff by department (active, on leave and onboarding)',
+          title: 'Teachers by department (active, on leave and onboarding)',
           columns: [
             { key: 'department', label: 'Department' },
-            { key: 'teaching', label: 'Teaching' },
-            { key: 'non_teaching', label: 'Non-teaching' },
-            { key: 'total', label: 'Total' },
+            { key: 'total', label: 'Teachers' },
           ],
-          rows: [...byDept.entries()]
-            .sort(([a], [b]) => a.localeCompare(b))
-            .map(([department, v]) => ({
-              department,
-              teaching: v.teaching,
-              non_teaching: v.non,
-              total: v.teaching + v.non,
-            })),
+          rows: rows
+            .map((r) => ({ department: r.department ?? '(No department)', total: r.n }))
+            .sort((a, b) => a.department.localeCompare(b.department)),
         };
       }
       case 'qualifications': {
@@ -191,9 +165,9 @@ export class StaffReportService {
           .orderBy(asc(teachers.lastName), asc(teachers.firstName));
         return {
           ...base,
-          title: 'Staff qualifications',
+          title: 'Teacher qualifications',
           columns: [
-            { key: 'teacher_number', label: 'Staff no.' },
+            { key: 'teacher_number', label: 'Teacher no.' },
             { key: 'name', label: 'Name' },
             { key: 'department', label: 'Department' },
             { key: 'type', label: 'Type' },
@@ -247,7 +221,7 @@ export class StaffReportService {
           ...base,
           title: `Documents expired or expiring within ${q.days} days`,
           columns: [
-            { key: 'teacher_number', label: 'Staff no.' },
+            { key: 'teacher_number', label: 'Teacher no.' },
             { key: 'name', label: 'Name' },
             { key: 'document', label: 'Document' },
             { key: 'expires_on', label: 'Expires' },
@@ -259,57 +233,6 @@ export class StaffReportService {
             document: type.name,
             expires_on: d.expiresOn,
             state: d.expiresOn! < today ? 'Expired' : 'Expiring soon',
-          })),
-        };
-      }
-      case 'leave-summary': {
-        const year = q.year ?? Number(todayIso(this.deps.clock).slice(0, 4));
-        const rows = await this.db
-          .select({
-            t: teachers,
-            typeName: leaveTypes.name,
-            days: sql<number>`sum(${leaveRequests.days})`.mapWith(Number),
-          })
-          .from(leaveRequests)
-          .innerJoin(
-            teachers,
-            and(
-              eq(teachers.tenantId, leaveRequests.tenantId),
-              eq(teachers.id, leaveRequests.teacherId),
-            ),
-          )
-          .innerJoin(
-            leaveTypes,
-            and(
-              eq(leaveTypes.tenantId, leaveRequests.tenantId),
-              eq(leaveTypes.id, leaveRequests.leaveTypeId),
-            ),
-          )
-          .where(
-            and(
-              this.staffFilter(tenantId, q),
-              eq(leaveRequests.status, 'APPROVED'),
-              sql`year(${leaveRequests.startDate}) = ${year}`,
-            ),
-          )
-          .groupBy(teachers.id, leaveTypes.id, leaveTypes.name)
-          .orderBy(asc(teachers.lastName), asc(teachers.firstName));
-        return {
-          ...base,
-          title: `Approved leave in ${year}`,
-          columns: [
-            { key: 'teacher_number', label: 'Staff no.' },
-            { key: 'name', label: 'Name' },
-            { key: 'department', label: 'Department' },
-            { key: 'leave_type', label: 'Leave type' },
-            { key: 'days', label: 'Days' },
-          ],
-          rows: rows.map((r) => ({
-            teacher_number: r.t.teacherNumber,
-            name: fullName(r.t),
-            department: r.t.department,
-            leave_type: r.typeName,
-            days: r.days,
           })),
         };
       }

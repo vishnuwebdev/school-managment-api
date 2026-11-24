@@ -135,7 +135,8 @@ describe('creating teachers and staff', () => {
     expect(res.status, JSON.stringify(res.body)).toBe(201);
     const t = res.body.data;
     expect(t.status).toBe('ACTIVE');
-    expect(t.staff_type).toBe('TEACHING');
+    // Teachers only: the record has no staff type (non-teaching staff left with 0040).
+    expect(t).not.toHaveProperty('staff_type');
     expect(t.teacher_number).toMatch(/^TCH-\d{4}-\d{5}$/);
     expect(t.full_name).toMatch(/^Meera /);
     expect(t.has_login).toBe(false);
@@ -152,20 +153,18 @@ describe('creating teachers and staff', () => {
     expect(types).toEqual(expect.arrayContaining(['TEACHER_CREATED', 'QUALIFICATION_ADDED']));
   });
 
-  it('can start PROSPECTIVE or ONBOARDING, and non-teaching staff are supported', async () => {
+  it('can start PROSPECTIVE or ONBOARDING', async () => {
     const p = await newTeacher('Cand', { status: 'PROSPECTIVE' });
     expect(p.status).toBe('PROSPECTIVE');
     const o = await newTeacher('Onb', { status: 'ONBOARDING' });
     expect(o.status).toBe('ONBOARDING');
-    const clerk = await newTeacher('Clerk', { staff_type: 'NON_TEACHING', designation: 'Clerk' });
-    expect((await api.get(`/teachers/${clerk.id}`)).body.data.staff_type).toBe('NON_TEACHING');
     // A creation request cannot start in a leaving status.
     const bad = await api.post('/teachers', person('Bad', uniq('Fam'), { status: 'RESIGNED' }));
     expect(bad.status).toBe(422);
     expect(code(bad)).toBe('VALIDATION_ERROR');
-    expect(
-      (await api.post('/teachers', person('Bad', uniq('Fam'), { staff_type: 'JANITOR' }))).status,
-    ).toBe(422);
+    // staff_type is no longer part of the record: it is ignored, not stored.
+    const legacy = await newTeacher('Legacy', { staff_type: 'NON_TEACHING' });
+    expect(legacy).not.toHaveProperty('staff_type');
   });
 
   it('numbers teachers per school without gaps or repeats, even in parallel', async () => {
@@ -257,7 +256,6 @@ describe('reading and updating', () => {
     const a = await newTeacher('Filt', { department: dept, employment_type: 'PART_TIME' });
     const b = await newTeacher('Filt', {
       department: dept,
-      staff_type: 'NON_TEACHING',
       status: 'ONBOARDING',
     });
     const c = await newTeacher('Filt', { department: dept, ...withEmail() });
@@ -266,7 +264,6 @@ describe('reading and updating', () => {
         (t: { id: string }) => t.id,
       );
     expect(await q('')).toHaveLength(3);
-    expect(await q('staff_type=NON_TEACHING')).toEqual([b.id]);
     expect(await q('status=ONBOARDING')).toEqual([b.id]);
     expect(await q('employment_type=PART_TIME')).toEqual([a.id]);
     expect(await q('status=RESIGNED')).toEqual([]);
@@ -548,6 +545,48 @@ describe('teaching assignments', () => {
     expect(detail.active_assignments).toHaveLength(2);
     const row = (await api.get(`/teachers?search=${t.teacher_number}`)).body.data[0];
     expect(row.active_assignment_count).toBe(2);
+  });
+
+  it('lists subjects per row, filters by status group and assignments, and summarises', async () => {
+    const before = (await api.get('/teachers/summary')).body.data;
+    const teaching = await newTeacher('Teaching');
+    await assign(teaching.id, sciSecA);
+    await assign(teaching.id, mathWide);
+    const idle = await newTeacher('Idle');
+    const joining = await newTeacher('Joining', { status: 'ONBOARDING' });
+    const gone = await newTeacher('Gone');
+    expect((await cmd(api, gone.id, 'deactivate', { reason: 'Left the school' })).status).toBe(200);
+
+    const row = (await api.get(`/teachers?search=${teaching.teacher_number}`)).body.data[0];
+    expect(row.subjects).toEqual(['Mathematics', 'Science']);
+    expect(
+      (await api.get(`/teachers?search=${idle.teacher_number}`)).body.data[0].subjects,
+    ).toEqual([]);
+
+    const ids = async (q: string) =>
+      ((await api.get(`/teachers?page_size=100&${q}`)).body.data as T[]).map((t) => t.id);
+    expect(await ids('has_assignments=true')).toContain(teaching.id);
+    expect(await ids('has_assignments=true')).not.toContain(idle.id);
+    expect(await ids('has_assignments=false')).toContain(idle.id);
+    expect(await ids(`status_group=JOINING&search=${joining.teacher_number}`)).toEqual([
+      joining.id,
+    ]);
+    expect(await ids(`status_group=LEFT&search=${gone.teacher_number}`)).toEqual([gone.id]);
+    expect(await ids(`status_group=CURRENT&search=${gone.teacher_number}`)).toEqual([]);
+    expect(await ids(`status_group=CURRENT&search=${idle.teacher_number}`)).toEqual([idle.id]);
+    expect((await api.get('/teachers?status_group=SOMETIMES')).status).toBe(422);
+
+    const after = (await api.get('/teachers/summary')).body.data;
+    expect(after.total - before.total).toBe(4);
+    expect(after.current - before.current).toBe(3);
+    expect(after.joining - before.joining).toBe(1);
+    expect(after.left - before.left).toBe(1);
+    expect(after.by_status.ACTIVE - (before.by_status.ACTIVE ?? 0)).toBe(2);
+    expect(after.current_without_login - before.current_without_login).toBe(3);
+    expect(after.current_without_assignments - before.current_without_assignments).toBe(2);
+    // Another school's teachers are never counted.
+    const other = (await B.admin.api.get('/teachers/summary')).body.data;
+    expect(other.total).toBeLessThan(after.total);
   });
 
   it('allows several teachers on one offering (primary, co-teacher, substitute)', async () => {
@@ -1341,7 +1380,7 @@ describe('audit, events and export', () => {
   it('exports CSV with an audit record and neutralises spreadsheet formulas', async () => {
     const dept = uniq('Exp');
     await newTeacher('=HYPERLINK("evil")', { department: dept, designation: 'Head, Science' });
-    await newTeacher('Plain', { department: dept, staff_type: 'NON_TEACHING' });
+    await newTeacher('Plain', { department: dept });
     const res = await api.get(`/teachers/export?department=${dept}`);
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toMatch(/text\/csv/);
@@ -1352,8 +1391,6 @@ describe('audit, events and export', () => {
     expect(res.text).toContain("'=HYPERLINK");
     expect(res.text).toContain('"Head, Science"');
     expect(res.text).not.toMatch(/salary|password/i);
-    const nt = await api.get(`/teachers/export?department=${dept}&staff_type=NON_TEACHING`);
-    expect(nt.text.trim().split('\n')).toHaveLength(2);
     const audit = await api.get('/audit-logs?page_size=100');
     expect(audit.body.data.some((a: { action: string }) => a.action === 'TEACHERS_EXPORTED')).toBe(
       true,

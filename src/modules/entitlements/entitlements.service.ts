@@ -17,7 +17,14 @@ import type { Actor } from '../../platform/context.js';
 import { publishEvent } from '../../platform/outbox.js';
 import { BusinessRuleError, ConflictError, NotFoundError } from '../../shared/errors.js';
 import {
+  APP_FEATURES,
+  APP_LINKED_FEATURES,
+  isSimpleMode,
+  SIMPLE_MODE_OFF_FEATURES,
+} from '../../catalog/product-mode.js';
+import {
   resolveEntitlements,
+  resolveSimpleEntitlements,
   type EntitlementSnapshot,
   type FeatureNode,
 } from './entitlement-resolver.js';
@@ -59,6 +66,7 @@ export class EntitlementService {
 
   async compute(tenantId: string, executor: Executor = this.deps.db): Promise<EntitlementSnapshot> {
     const now = this.deps.clock.now();
+    if (isSimpleMode(this.deps.env)) return this.computeSimple(tenantId, executor, now);
     const [catalog, subs, rows] = await Promise.all([
       this.catalog(executor),
       executor
@@ -101,6 +109,38 @@ export class EntitlementService {
         maxStaffUsers: current?.maxStaffUsers ?? null,
         maxStudents: current?.maxStudents ?? null,
       },
+      now,
+    });
+  }
+
+  private async computeSimple(tenantId: string, executor: Executor, now: Date) {
+    const [catalog, rows] = await Promise.all([
+      this.catalog(executor),
+      executor
+        .select({
+          featureCode: features.code,
+          sourceType: entitlements.sourceType,
+          sourceReference: entitlements.sourceReference,
+          effect: entitlements.effect,
+          startsAt: entitlements.startsAt,
+          endsAt: entitlements.endsAt,
+        })
+        .from(entitlements)
+        .innerJoin(features, eq(features.id, entitlements.featureId))
+        .where(
+          and(
+            eq(entitlements.tenantId, tenantId),
+            eq(entitlements.status, 'ACTIVE'),
+            eq(entitlements.sourceType, 'ADMIN_OVERRIDE'),
+          ),
+        ),
+    ]);
+    return resolveSimpleEntitlements({
+      catalog,
+      rows,
+      appFeatures: Object.values(APP_FEATURES),
+      appLinked: APP_LINKED_FEATURES,
+      off: SIMPLE_MODE_OFF_FEATURES,
       now,
     });
   }

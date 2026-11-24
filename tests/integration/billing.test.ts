@@ -133,11 +133,17 @@ describe('recording offline payments', () => {
 
     const first = await root.post(`/platform/billing/invoices/${S.invoiceId}/payments`, {
       amount_minor: 1000,
-      method: 'CASH',
+      method: 'UPI',
       notes: 'Paid at office',
     });
     expect(first.status, JSON.stringify(first.body)).toBe(201);
     expect(first.body.data.invoice_status).toBe('OPEN');
+    // India has no "mobile money": the old code is refused.
+    const old = await root.post(`/platform/billing/invoices/${S.invoiceId}/payments`, {
+      amount_minor: 1,
+      method: 'MOBILE_MONEY',
+    });
+    expect(old.status).toBe(422);
     let b = (await S.admin.api.get('/tenants/current/billing')).body.data;
     expect(b.invoices[0]).toMatchObject({ payment_status: 'PART_PAID', paid_minor: 1000 });
 

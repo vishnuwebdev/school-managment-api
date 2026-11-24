@@ -8,6 +8,6 @@ coverage/
 *.log
 .DS_Store
 # Local file uploads (development storage)
-storage/
+/storage/
 # Pre-rebuild JavaScript API, kept only as a porting reference (not built, not run)
 legacy/node_modules/

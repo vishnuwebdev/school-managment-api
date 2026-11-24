@@ -145,11 +145,49 @@ export class GuardianService {
         .offset(offsetOf(q)),
       this.db.select({ n: count() }).from(guardians).where(where),
     ]);
+    // The children of this page's guardians, with photos, so the directory can show who
+    // each guardian belongs to at a glance.
+    const kids = new Map<
+      string,
+      { id: string; first_name: string; last_name: string; photo_file_id: string | null }[]
+    >();
+    const guardianIds = rows.map((r) => r.g.id);
+    if (guardianIds.length) {
+      const links = await this.db
+        .select({
+          guardianId: studentGuardians.guardianId,
+          id: students.id,
+          firstName: students.firstName,
+          lastName: students.lastName,
+          photoFileId: students.photoFileId,
+        })
+        .from(studentGuardians)
+        .innerJoin(students, eq(students.id, studentGuardians.studentId))
+        .where(
+          and(
+            eq(studentGuardians.tenantId, tenantId),
+            inArray(studentGuardians.guardianId, guardianIds),
+            eq(studentGuardians.status, 'ACTIVE'),
+          ),
+        )
+        .orderBy(asc(students.firstName), asc(students.lastName));
+      for (const l of links) {
+        const list = kids.get(l.guardianId) ?? [];
+        list.push({
+          id: l.id,
+          first_name: l.firstName,
+          last_name: l.lastName,
+          photo_file_id: l.photoFileId,
+        });
+        kids.set(l.guardianId, list);
+      }
+    }
     return pageOf(
       rows.map((r) => ({
         ...presentGuardian(r.g),
         student_count: Number(r.children),
         student_names: r.childNames,
+        student_previews: kids.get(r.g.id) ?? [],
       })),
       total?.n ?? 0,
       q,
@@ -189,6 +227,7 @@ export class GuardianService {
         student_number: r.s.studentNumber,
         full_name: [r.s.firstName, r.s.middleName, r.s.lastName].filter(Boolean).join(' '),
         status: r.s.status,
+        photo_file_id: r.s.photoFileId,
         relationship_type: r.l.relationshipType,
         relationship_label: r.l.relationshipLabel,
         is_primary: r.l.isPrimary,

@@ -4,11 +4,11 @@ import {
   EMPLOYMENT_TYPE,
   GENDER,
   QUALIFICATION_TYPE,
-  STAFF_TYPE,
   TEACHER_STATUS,
   TEACHING_ASSIGNMENT_STATUS,
 } from '../../db/schema/index.js';
 import { PaginationQuery } from '../../shared/pagination.js';
+import { PasswordSchema } from '../identity/password.js';
 
 export const IdParams = z.object({ id: z.uuid() });
 export const QualificationParams = z.object({ id: z.uuid(), qid: z.uuid() });
@@ -65,7 +65,6 @@ export const UpdateQualificationBody = z.object({
 
 // ---- Teachers ------------------------------------------------------------------
 export const TeacherFields = {
-  staff_type: z.enum(STAFF_TYPE).optional(),
   first_name: Text(100),
   middle_name: OptText(100),
   last_name: Text(100),
@@ -107,9 +106,15 @@ export const UpdateTeacherBody = z.object({
   last_name: TeacherFields.last_name.optional(),
 });
 
+/** Status groups for the list's quick filters: everyone still with the school, people still joining, people who left. */
+export const TEACHER_STATUS_GROUPS = ['CURRENT', 'JOINING', 'LEFT'] as const;
+
 export const TeacherListQuery = PaginationQuery.extend({
   status: z.enum(TEACHER_STATUS).optional(),
-  staff_type: z.enum(STAFF_TYPE).optional(),
+  /** CURRENT = not left · JOINING = prospective or onboarding · LEFT = inactive, resigned, terminated, retired or archived. */
+  status_group: z.enum(TEACHER_STATUS_GROUPS).optional(),
+  /** true = has at least one active teaching assignment, false = none. */
+  has_assignments: z.stringbool().optional(),
   employment_type: z.enum(EMPLOYMENT_TYPE).optional(),
   department: z.string().trim().min(1).max(100).optional(),
   /** true = has a linked login (membership), false = none. */
@@ -141,13 +146,23 @@ export const TeacherCommandBody = z.object({
 });
 
 export const PortalAccessBody = z.object({
-  role_id: z.uuid(),
+  /** Defaults to the built-in Teacher role (the only one in the simple product mode). */
+  role_id: z.uuid().optional(),
   /** ASSIGNED (default): only the sections the teacher is assigned to. ALL: school-wide. */
   scope: z.enum(['ASSIGNED', 'ALL']).default('ASSIGNED'),
-  /** Defaults to the teacher's email; required when the teacher has none. */
+  /** Defaults to the teacher's email. A login needs an email or a mobile number. */
   email: z.email().max(254).toLowerCase().optional(),
+  /** Mobile number the teacher signs in with (instead of, or as well as, the email). */
+  mobile: z.string().trim().min(7).max(32).optional(),
+  /**
+   * Set the password now instead of emailing an invitation: the login is active
+   * at once. Not allowed when the email already signs in to another school.
+   */
+  password: PasswordSchema.optional(),
 });
 export const RevokePortalBody = z.object({ reason: z.string().trim().min(3).max(500).optional() });
+export const PortalPasswordBody = z.object({ password: PasswordSchema });
+export const ResetPinBody = z.object({ reason: z.string().trim().min(3).max(500).optional() });
 
 // ---- Teaching assignments ----------------------------------------------------------
 export const CreateAssignmentBody = z.object({
@@ -174,6 +189,9 @@ export const AssignmentListQuery = PaginationQuery.extend({
 
 // ---- Class teachers ----------------------------------------------------------------
 export const SectionParams = z.object({ sectionId: z.uuid() });
+export const ClassParams = z.object({ classId: z.uuid() });
+/** A class without sections: which academic year (default: the active one). */
+export const ClassYearQuery = z.object({ academic_year_id: z.uuid().optional() });
 export const ClassTeacherListQuery = z.object({ academic_year_id: z.uuid().optional() });
 export const AssignClassTeacherBody = z.object({
   teacher_id: z.uuid(),

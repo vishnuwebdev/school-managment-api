@@ -267,6 +267,30 @@ export class AssignmentService {
     return out;
   }
 
+  /** Distinct subject names each teacher teaches now (active assignments), sorted. */
+  async activeSubjectNames(tenantId: string, teacherIds: string[], ex: Executor = this.db) {
+    const out = new Map<string, string[]>();
+    if (!teacherIds.length) return out;
+    const rows = await ex
+      .selectDistinct({ teacherId: teachingAssignments.teacherId, name: subjects.name })
+      .from(teachingAssignments)
+      .innerJoin(subjectOfferings, eq(subjectOfferings.id, teachingAssignments.subjectOfferingId))
+      .innerJoin(subjects, eq(subjects.id, subjectOfferings.subjectId))
+      .where(
+        and(
+          eq(teachingAssignments.tenantId, tenantId),
+          sql`${teachingAssignments.teacherId} in (${sql.join(
+            teacherIds.map((i) => sql`${i}`),
+            sql`, `,
+          )})`,
+          eq(teachingAssignments.status, 'ACTIVE'),
+        ),
+      )
+      .orderBy(asc(subjects.name));
+    for (const r of rows) out.set(r.teacherId, [...(out.get(r.teacherId) ?? []), r.name]);
+    return out;
+  }
+
   // ---- create ----------------------------------------------------------------------
 
   async create(
