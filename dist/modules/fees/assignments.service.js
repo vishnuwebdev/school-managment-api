@@ -132,7 +132,7 @@ export class AssignmentService {
             throw validationIssue("discount_reason", "A reason is required for a discount");
         let id;
         await this.db.transaction(async (tx) => {
-            const s = await loadStructure(tx, c.tenantId, input.fee_structure_id, "share");
+            const s = await loadStructure(tx, c.tenantId, input.fee_structure_id, "update");
             this.assertAssignable(s);
             const student = await loadStudent(tx, c.tenantId, input.student_id, c.principal, "fees.manage");
             const enrolQ = tx
@@ -285,7 +285,7 @@ export class AssignmentService {
             assignment_ids: [],
         };
         await this.db.transaction(async (tx) => {
-            const s = await loadStructure(tx, c.tenantId, input.fee_structure_id, "share");
+            const s = await loadStructure(tx, c.tenantId, input.fee_structure_id, "update");
             this.assertAssignable(s);
             let classId = input.class_id ?? null;
             if (input.section_id) {

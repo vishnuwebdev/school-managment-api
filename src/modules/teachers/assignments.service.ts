@@ -330,7 +330,7 @@ export class AssignmentService {
             eq(subjectOfferings.tenantId, tenantId),
           ),
         )
-        .for('share');
+        .for('update');
       if (!offering) throw new NotFoundError('Subject offering');
       if (offering.o.status !== 'ACTIVE')
         throw new BusinessRuleError(

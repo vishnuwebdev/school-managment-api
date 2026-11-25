@@ -77,7 +77,7 @@ export class AdjustmentService {
     async request(c, input) {
         let id;
         await this.db.transaction(async (tx) => {
-            const d = await loadDemand(tx, c.tenantId, input.fee_demand_id, c.principal, 'fees.concessions.request', 'share');
+            const d = await loadDemand(tx, c.tenantId, input.fee_demand_id, c.principal, 'fees.concessions.request', 'update');
             if (!ADJUSTABLE.includes(d.status))
                 throw businessRule('DEMAND_NOT_ADJUSTABLE', 'This invoice can no longer be adjusted', {
                     demand_status: d.status,

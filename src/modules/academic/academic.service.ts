@@ -187,7 +187,7 @@ export class AcademicService {
           inArray(enrollments.status, OPEN),
         ),
       );
-    const [r] = await (fresh ? q.for('share') : q);
+    const [r] = await (fresh ? q.for('update') : q);
     return r?.n ?? 0;
   }
 

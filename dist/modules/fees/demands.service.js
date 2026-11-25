@@ -378,7 +378,7 @@ export class DemandService {
     async applyLateFee(c, id) {
         await ensureSettings(this.db, c.tenantId);
         await this.db.transaction(async (tx) => {
-            const settings = await readSettings(tx, c.tenantId, 'share');
+            const settings = await readSettings(tx, c.tenantId, 'update');
             if (!settings.lateFeeEnabled)
                 throw businessRule('LATE_FEE_DISABLED', 'Late fees are not switched on for this school', {}, 'OPERATION_NOT_ALLOWED');
             const d = await loadDemand(tx, c.tenantId, id, c.principal, 'fees.manage', 'update');
@@ -416,7 +416,7 @@ export class DemandService {
         if (!candidates.length)
             return out;
         await this.db.transaction(async (tx) => {
-            const fresh = await readSettings(tx, c.tenantId, 'share');
+            const fresh = await readSettings(tx, c.tenantId, 'update');
             const locked = await lockDemands(tx, c.tenantId, candidates.map((r) => r.id));
             const now = this.deps.clock.now();
             for (const id of [...locked.keys()].sort()) {

@@ -16,9 +16,10 @@ export default async function setup() {
     password: decodeURIComponent(url.password),
   });
   await admin.query(`DROP DATABASE IF EXISTS \`${dbName}\``);
-  await admin.query(
-    `CREATE DATABASE \`${dbName}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci`,
-  );
+  // MariaDB (production) has no utf8mb4_0900_ai_ci; the tests run on either engine.
+  const [[{ v }]] = (await admin.query('SELECT VERSION() AS v')) as unknown as [[{ v: string }]];
+  const collation = /mariadb/i.test(v) ? 'utf8mb4_unicode_ci' : 'utf8mb4_0900_ai_ci';
+  await admin.query(`CREATE DATABASE \`${dbName}\` CHARACTER SET utf8mb4 COLLATE ${collation}`);
   await admin.end();
 
   const { db, pool } = createDatabase(url.toString());

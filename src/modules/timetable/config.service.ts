@@ -86,7 +86,7 @@ export class TimetableConfigService {
       .from(timetablePeriods)
       .where(and(eq(timetablePeriods.tenantId, tenantId), eq(timetablePeriods.venueId, venueId)))
       .limit(1)
-      .for('share');
+      .for('update');
     if (p) return true;
     const [o] = await tx
       .select({ id: timetableDayOverrides.id })
@@ -98,7 +98,7 @@ export class TimetableConfigService {
         ),
       )
       .limit(1)
-      .for('share');
+      .for('update');
     return !!o;
   }
 

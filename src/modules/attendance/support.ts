@@ -172,7 +172,7 @@ export const settingsPresent = (s: SettingsRow) => ({
 export async function readSettings(
   ex: Executor,
   tenantId: string,
-  lock: 'share' | 'update' | false = false,
+  lock: 'update' | false = false,
 ): Promise<SettingsRow> {
   const q = ex.select().from(attendanceSettings).where(eq(attendanceSettings.tenantId, tenantId));
   const [row] = await (lock ? q.for(lock) : q);
@@ -184,7 +184,7 @@ export async function loadStatuses(
   ex: Executor,
   tenantId: string,
   ids: string[],
-  lock: 'share' | false = false,
+  lock: 'update' | false = false,
 ): Promise<Map<string, StatusRow>> {
   const out = new Map<string, StatusRow>();
   if (!ids.length) return out;

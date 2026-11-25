@@ -166,7 +166,7 @@ export async function ensureSettings(
 export async function readSettings(
   ex: Executor,
   tenantId: string,
-  lock: "share" | "update" | false = false,
+  lock: "update" | false = false,
 ): Promise<SettingsRow> {
   const q = ex
     .select()
@@ -376,7 +376,7 @@ export async function loadDemand(
   id: string,
   principal: Principal,
   permission: string,
-  lock?: "update" | "share",
+  lock?: "update",
 ): Promise<DemandRow> {
   const q = ex
     .select()
@@ -399,7 +399,7 @@ export async function loadPayment(
   id: string,
   principal: Principal,
   permission: string,
-  lock?: "update" | "share",
+  lock?: "update",
 ): Promise<PaymentRow> {
   const q = ex
     .select()
@@ -422,7 +422,7 @@ export async function loadAssignment(
   id: string,
   principal: Principal,
   permission: string,
-  lock?: "update" | "share",
+  lock?: "update",
 ): Promise<AssignmentRow> {
   const q = ex
     .select()
@@ -443,7 +443,7 @@ export async function loadStructure(
   ex: Executor,
   tenantId: string,
   id: string,
-  lock?: "update" | "share",
+  lock?: "update",
 ): Promise<StructureRow> {
   const q = ex
     .select()
@@ -458,7 +458,7 @@ export async function loadCategory(
   ex: Executor,
   tenantId: string,
   id: string,
-  lock?: "update" | "share",
+  lock?: "update",
 ): Promise<CategoryRow> {
   const q = ex
     .select()

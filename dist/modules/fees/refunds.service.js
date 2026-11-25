@@ -98,7 +98,7 @@ export class RefundService {
                 .select({ amount: feeRefunds.amount })
                 .from(feeRefunds)
                 .where(and(eq(feeRefunds.tenantId, c.tenantId), eq(feeRefunds.paymentId, p.id), inArray(feeRefunds.status, [...OPEN_REFUND_STATUSES])))
-                .for('share');
+                .for('update');
             const reserved = open.reduce((a, r) => a + toMinor(r.amount), 0n);
             const refundable = toMinor(p.amount) - toMinor(p.refundedAmount) - reserved;
             const amount = toMinor(input.amount);

@@ -56,7 +56,7 @@ export class AdjustmentService {
     c: Caller,
     id: string,
     permission: string,
-    lock?: 'update' | 'share',
+    lock?: 'update',
   ): Promise<AdjustmentRow> {
     const q = ex
       .select()
@@ -142,7 +142,7 @@ export class AdjustmentService {
         input.fee_demand_id,
         c.principal,
         'fees.concessions.request',
-        'share',
+        'update',
       );
       if (!(ADJUSTABLE as readonly string[]).includes(d.status))
         throw businessRule('DEMAND_NOT_ADJUSTABLE', 'This invoice can no longer be adjusted', {

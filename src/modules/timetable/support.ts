@@ -95,7 +95,7 @@ export const settingsPresent = (s: SettingsRow) => ({
 export async function readSettings(
   ex: Executor,
   tenantId: string,
-  lock: 'share' | 'update' | false = false,
+  lock: 'update' | false = false,
 ): Promise<SettingsRow> {
   const q = ex.select().from(timetableSettings).where(eq(timetableSettings.tenantId, tenantId));
   const [row] = await (lock ? q.for(lock) : q);
@@ -186,7 +186,7 @@ export async function loadSection(
   sectionId: string,
   principal: Principal,
   permission: string,
-  lock?: 'share',
+  lock?: 'update',
 ) {
   const q = ex
     .select({
@@ -219,7 +219,7 @@ export async function loadClassOwner(
   academicYearId: string,
   principal: Principal,
   permission: string,
-  lock?: 'share',
+  lock?: 'update',
 ) {
   const q = ex
     .select({
@@ -253,7 +253,7 @@ export async function resolveOwner(
   input: { section_id?: string; class_id?: string; academic_year_id?: string },
   principal: Principal,
   permission: string,
-  lock?: 'share',
+  lock?: 'update',
 ): Promise<Owner> {
   if (input.section_id) {
     const s = await loadSection(ex, tenantId, input.section_id, principal, permission, lock);

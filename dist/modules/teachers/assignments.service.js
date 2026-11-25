@@ -177,7 +177,7 @@ export class AssignmentService {
                 .from(subjectOfferings)
                 .innerJoin(academicYears, eq(academicYears.id, subjectOfferings.academicYearId))
                 .where(and(eq(subjectOfferings.id, input.subject_offering_id), eq(subjectOfferings.tenantId, tenantId)))
-                .for('share');
+                .for('update');
             if (!offering)
                 throw new NotFoundError('Subject offering');
             if (offering.o.status !== 'ACTIVE')

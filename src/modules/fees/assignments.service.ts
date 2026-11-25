@@ -301,7 +301,7 @@ export class AssignmentService {
         tx,
         c.tenantId,
         input.fee_structure_id,
-        "share",
+        "update",
       );
       this.assertAssignable(s);
       const student = await loadStudent(
@@ -531,7 +531,7 @@ export class AssignmentService {
         tx,
         c.tenantId,
         input.fee_structure_id,
-        "share",
+        "update",
       );
       this.assertAssignable(s);
       let classId = input.class_id ?? null;

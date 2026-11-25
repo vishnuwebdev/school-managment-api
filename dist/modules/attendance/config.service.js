@@ -237,7 +237,7 @@ export class AttendanceConfigService {
         const id = await this.db.transaction(async (tx) => {
             if (input.category === 'LATE') {
                 // LATE-category statuses follow the school-wide switch.
-                const s = await readSettings(tx, tenantId, 'share');
+                const s = await readSettings(tx, tenantId, 'update');
                 present = s.lateCountsAsPresent ? 1 : 0;
             }
             try {
@@ -292,7 +292,7 @@ export class AttendanceConfigService {
             let present = input.counts_as_present ?? Number(before.countsAsPresent);
             const absent = input.counts_as_absent ?? Number(before.countsAsAbsent);
             if (category === 'LATE' && !before.isSystem) {
-                const s = await readSettings(tx, tenantId, 'share');
+                const s = await readSettings(tx, tenantId, 'update');
                 present = s.lateCountsAsPresent ? 1 : 0;
             }
             if (present + absent > 1.0001)

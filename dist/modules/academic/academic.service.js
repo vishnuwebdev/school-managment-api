@@ -134,7 +134,7 @@ export class AcademicService {
             .select({ n: count() })
             .from(enrollments)
             .where(and(eq(enrollments.tenantId, tenantId), eq(enrollments.sectionId, sectionId), inArray(enrollments.status, OPEN)));
-        const [r] = await (fresh ? q.for('share') : q);
+        const [r] = await (fresh ? q.for('update') : q);
         return r?.n ?? 0;
     }
     // ===========================================================================

@@ -153,7 +153,7 @@ export class PaymentService {
           inArray(feeRefunds.status, [...OPEN_REFUND_STATUSES]),
         ),
       );
-    const rows = await (lock ? q.for('share') : q);
+    const rows = await (lock ? q.for('update') : q);
     return rows.reduce((a, r) => a + toMinor(r.amount), 0n);
   }
 
@@ -869,7 +869,7 @@ export class PaymentService {
             c.principal,
             'fees.payments.create',
           );
-          const settings = await readSettings(tx, c.tenantId, 'share');
+          const settings = await readSettings(tx, c.tenantId, 'update');
           const tz = await schoolTimezone(tx, c.tenantId);
           const today = await schoolToday(tx, c.tenantId, this.deps.clock);
           // Demands first (in id order), the payment number and the receipt number last.

@@ -439,7 +439,7 @@ export class FeeConfigService {
         if (!sec) throw new NotFoundError('Section');
       }
       this.assertDatesInYear(year, input.effective_from, input.effective_to);
-      const settings = await readSettings(tx, c.tenantId, 'share');
+      const settings = await readSettings(tx, c.tenantId, 'update');
       id = uuidv7();
       try {
         await tx.insert(feeStructures).values({
@@ -546,7 +546,7 @@ export class FeeConfigService {
   }
 
   private async assertCategoryUsable(tx: Executor, tenantId: string, categoryId: string) {
-    const cat = await loadCategory(tx, tenantId, categoryId, 'share');
+    const cat = await loadCategory(tx, tenantId, categoryId, 'update');
     if (cat.status !== 'ACTIVE')
       throw businessRule('CATEGORY_INACTIVE', 'The fee category is inactive', {
         fee_category_id: categoryId,
@@ -729,7 +729,7 @@ export class FeeConfigService {
           ),
         )
         .where(and(eq(feeComponents.tenantId, c.tenantId), eq(feeComponents.feeStructureId, id)))
-        .for('share');
+        .for('update');
       const blocking: { component_id: string | null; reason: string; message: string }[] = [];
       if (!comps.length)
         blocking.push({
@@ -889,7 +889,7 @@ export class FeeConfigService {
   async duplicate(c: Caller, sourceId: string, input: z.infer<typeof DuplicateStructureBody>) {
     let id!: string;
     await this.db.transaction(async (tx) => {
-      const src = await loadStructure(tx, c.tenantId, sourceId, 'share');
+      const src = await loadStructure(tx, c.tenantId, sourceId, 'update');
       const [max] = await tx
         .select({ n: sql<number>`coalesce(max(${feeStructures.versionNo}), 0)` })
         .from(feeStructures)
@@ -929,7 +929,7 @@ export class FeeConfigService {
         .where(
           and(eq(feeComponents.tenantId, c.tenantId), eq(feeComponents.feeStructureId, src.id)),
         )
-        .for('share');
+        .for('update');
       if (comps.length)
         await tx.insert(feeComponents).values(
           comps.map((k) => ({

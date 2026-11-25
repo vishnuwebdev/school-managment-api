@@ -161,7 +161,7 @@ export class SessionService {
             .innerJoin(students, and(eq(students.tenantId, enrollments.tenantId), eq(students.id, enrollments.studentId)))
             .where(and(eq(enrollments.tenantId, s.tenantId), eq(enrollments.sectionId, s.sectionId), eq(enrollments.academicYearId, s.academicYearId), inArray(enrollments.status, [...ROSTER_ENROLLMENT_STATUSES]), lte(enrollments.startDate, s.sessionDate), or(isNull(enrollments.endDate), gt(enrollments.endDate, s.sessionDate))))
             .orderBy(asc(students.lastName), asc(students.firstName), asc(students.id));
-        const found = await (lock ? q.for('share') : q);
+        const found = await (lock ? q.for('update') : q);
         const byStudent = new Map();
         for (const r of found) {
             const cur = byStudent.get(r.studentId);
@@ -371,14 +371,14 @@ export class SessionService {
                 .select()
                 .from(academicSections)
                 .where(and(eq(academicSections.id, input.section_id), eq(academicSections.tenantId, c.tenantId)))
-                .for('share');
+                .for('update');
             if (!section || !sectionInScope(c.principal, 'attendance.mark', section))
                 throw new NotFoundError('Section');
             const [year] = await tx
                 .select()
                 .from(academicYears)
                 .where(and(eq(academicYears.id, section.academicYearId), eq(academicYears.tenantId, c.tenantId)))
-                .for('share');
+                .for('update');
             if (!year)
                 throw new NotFoundError('Academic year');
             if (year.status !== 'ACTIVE')
@@ -396,7 +396,7 @@ export class SessionService {
             const off = await this.calendar.dayOff(c.tenantId, input.session_date, { kind: 'class', classId: section.classId, sectionId: section.id }, tx);
             if (off)
                 throw new BusinessRuleError('OPERATION_NOT_ALLOWED', `No school on this day: ${off.reason === 'HOLIDAY' ? `holiday (${off.name})` : `weekly off (${off.name})`}`, { field: 'session_date', day_off: off });
-            const settings = await readSettings(tx, c.tenantId, 'share');
+            const settings = await readSettings(tx, c.tenantId, 'update');
             assertEditWindow(c.principal, settings, { sessionDate: input.session_date, reopenedAt: null }, today);
             let offeringId = null;
             if (input.attendance_type === 'SUBJECT') {
@@ -404,7 +404,7 @@ export class SessionService {
                     .select()
                     .from(subjectOfferings)
                     .where(and(eq(subjectOfferings.id, input.subject_offering_id), eq(subjectOfferings.tenantId, c.tenantId)))
-                    .for('share');
+                    .for('update');
                 if (!o)
                     throw new NotFoundError('Subject offering');
                 if (o.status !== 'ACTIVE' ||
@@ -480,7 +480,7 @@ export class SessionService {
                     .select({ id: attendanceSessions.id })
                     .from(attendanceSessions)
                     .where(sameSession)
-                    .for('share');
+                    .for('update');
                 if (!winner)
                     throw err;
                 return { id: winner.id, created: false };
@@ -518,7 +518,7 @@ export class SessionService {
                 throw new BusinessRuleError('INVALID_STATE', s.status === 'SUBMITTED'
                     ? 'The session is awaiting approval and cannot be edited'
                     : 'The session is final. Request a correction instead, or ask an approver to reopen it.', { session_status: s.status });
-            const settings = await readSettings(tx, c.tenantId, 'share');
+            const settings = await readSettings(tx, c.tenantId, 'update');
             assertEditWindow(c.principal, settings, s, await schoolToday(tx, c.tenantId, this.deps.clock));
             const eligible = await this.eligible(tx, s, true);
             const eligibleBy = new Map(eligible.map((e) => [e.studentId, e]));
@@ -544,7 +544,7 @@ export class SessionService {
                     .map((e) => ({ student_id: e.studentId, status_id: sid, remarks: o.markAll.remarks }));
                 if (!entries.length && o.markAll.statusId) {
                     // still validate the status the caller named
-                    const st = await loadStatuses(tx, c.tenantId, [o.markAll.statusId], 'share');
+                    const st = await loadStatuses(tx, c.tenantId, [o.markAll.statusId], 'update');
                     if (!st.has(o.markAll.statusId))
                         throw validationIssue('status_id', 'Unknown attendance status');
                 }
@@ -557,7 +557,7 @@ export class SessionService {
                 if (ex)
                     ids.add(ex.statusId);
             }
-            const statuses = await loadStatuses(tx, c.tenantId, [...ids], 'share');
+            const statuses = await loadStatuses(tx, c.tenantId, [...ids], 'update');
             const issues = [];
             const at = (i, f) => (o.mode === 'bulk' ? `records.${i}.${f}` : f);
             entries.forEach((e, i) => {
@@ -682,7 +682,7 @@ export class SessionService {
                 throw new BusinessRuleError('INVALID_STATE', 'Only a draft session can be submitted', {
                     session_status: s.status,
                 });
-            const settings = await readSettings(tx, c.tenantId, 'share');
+            const settings = await readSettings(tx, c.tenantId, 'update');
             assertEditWindow(c.principal, settings, s, await schoolToday(tx, c.tenantId, this.deps.clock));
             const eligible = await this.eligible(tx, s, true);
             if (!eligible.length)
@@ -833,7 +833,7 @@ export class SessionService {
                 .from(attendanceCorrections)
                 .innerJoin(attendanceRecords, and(eq(attendanceRecords.tenantId, attendanceCorrections.tenantId), eq(attendanceRecords.id, attendanceCorrections.recordId)))
                 .where(and(eq(attendanceCorrections.tenantId, c.tenantId), eq(attendanceRecords.sessionId, s.id), eq(attendanceCorrections.status, 'PENDING')))
-                .for('share');
+                .for('update');
             if (pending.length)
                 throw new BusinessRuleError('OPERATION_NOT_ALLOWED', 'Resolve the pending corrections of this session before reopening it', { reason: 'PENDING_CORRECTIONS', pending_count: pending.length });
             await tx

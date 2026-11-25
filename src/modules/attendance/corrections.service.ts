@@ -59,7 +59,7 @@ export class CorrectionService {
     peek: { recordId: string; sessionId: string },
     permission: string,
   ) {
-    const session = await this.sessions.loadSession(tx, c, peek.sessionId, permission, 'share');
+    const session = await this.sessions.loadSession(tx, c, peek.sessionId, permission, 'update');
     const [record] = await tx
       .select()
       .from(attendanceRecords)
@@ -142,12 +142,12 @@ export class CorrectionService {
           'Only records of a final session need a correction. Edit the register directly instead.',
           { session_status: session.status },
         );
-      const settings = await readSettings(tx, c.tenantId, 'share');
+      const settings = await readSettings(tx, c.tenantId, 'update');
       const st = await loadStatuses(
         tx,
         c.tenantId,
         [record.statusId, input.new_status_id],
-        'share',
+        'update',
       );
       const from = st.get(record.statusId)!;
       const to = st.get(input.new_status_id);
@@ -242,7 +242,7 @@ export class CorrectionService {
         throw new BusinessRuleError('INVALID_STATE', 'The session is no longer final', {
           session_status: session.status,
         });
-      const st = await loadStatuses(tx, c.tenantId, [corr.oldStatusId, corr.newStatusId], 'share');
+      const st = await loadStatuses(tx, c.tenantId, [corr.oldStatusId, corr.newStatusId], 'update');
       const from = st.get(corr.oldStatusId)!;
       const to = st.get(corr.newStatusId)!;
       if (record.statusId !== corr.oldStatusId)
@@ -295,7 +295,7 @@ export class CorrectionService {
         throw new BusinessRuleError('INVALID_STATE', 'The correction has already been decided', {
           correction_status: corr.status,
         });
-      const st = await loadStatuses(tx, c.tenantId, [corr.oldStatusId, corr.newStatusId], 'share');
+      const st = await loadStatuses(tx, c.tenantId, [corr.oldStatusId, corr.newStatusId], 'update');
       await tx
         .update(attendanceCorrections)
         .set({

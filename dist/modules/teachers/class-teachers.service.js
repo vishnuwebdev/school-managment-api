@@ -176,7 +176,7 @@ export class ClassTeacherService {
             .select()
             .from(academicClasses)
             .where(and(eq(academicClasses.id, classId), eq(academicClasses.tenantId, tenantId)))
-            .for('share');
+            .for('update');
         if (!k)
             throw new NotFoundError('Class');
         if (k.status !== 'ACTIVE')
@@ -381,7 +381,7 @@ export class ClassTeacherService {
             .innerJoin(academicYears, eq(academicYears.id, academicSections.academicYearId))
             .innerJoin(academicClasses, eq(academicClasses.id, academicSections.classId))
             .where(and(eq(academicSections.id, sectionId), eq(academicSections.tenantId, tenantId)))
-            .for('share');
+            .for('update');
         if (!r)
             throw new NotFoundError('Section');
         if (r.s.status !== 'ACTIVE')

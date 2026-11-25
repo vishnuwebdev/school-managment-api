@@ -125,7 +125,7 @@ export class SessionService {
     c: Caller,
     id: string,
     permission: string,
-    lock: 'share' | 'update' | false = false,
+    lock: 'update' | false = false,
   ): Promise<SessionRow> {
     const scope = placementScope(c.principal, permission, {
       section: attendanceSessions.sectionId,
@@ -286,7 +286,7 @@ export class SessionService {
         ),
       )
       .orderBy(asc(students.lastName), asc(students.firstName), asc(students.id));
-    const found = await (lock ? q.for('share') : q);
+    const found = await (lock ? q.for('update') : q);
     const byStudent = new Map<string, (typeof found)[number]>();
     for (const r of found) {
       const cur = byStudent.get(r.studentId);
@@ -571,7 +571,7 @@ export class SessionService {
         .where(
           and(eq(academicSections.id, input.section_id), eq(academicSections.tenantId, c.tenantId)),
         )
-        .for('share');
+        .for('update');
       if (!section || !sectionInScope(c.principal, 'attendance.mark', section))
         throw new NotFoundError('Section');
       const [year] = await tx
@@ -580,7 +580,7 @@ export class SessionService {
         .where(
           and(eq(academicYears.id, section.academicYearId), eq(academicYears.tenantId, c.tenantId)),
         )
-        .for('share');
+        .for('update');
       if (!year) throw new NotFoundError('Academic year');
       if (year.status !== 'ACTIVE')
         throw new BusinessRuleError(
@@ -613,7 +613,7 @@ export class SessionService {
           `No school on this day: ${off.reason === 'HOLIDAY' ? `holiday (${off.name})` : `weekly off (${off.name})`}`,
           { field: 'session_date', day_off: off },
         );
-      const settings = await readSettings(tx, c.tenantId, 'share');
+      const settings = await readSettings(tx, c.tenantId, 'update');
       assertEditWindow(
         c.principal,
         settings,
@@ -632,7 +632,7 @@ export class SessionService {
               eq(subjectOfferings.tenantId, c.tenantId),
             ),
           )
-          .for('share');
+          .for('update');
         if (!o) throw new NotFoundError('Subject offering');
         if (
           o.status !== 'ACTIVE' ||
@@ -724,7 +724,7 @@ export class SessionService {
           .select({ id: attendanceSessions.id })
           .from(attendanceSessions)
           .where(sameSession)
-          .for('share');
+          .for('update');
         if (!winner) throw err;
         return { id: winner.id, created: false };
       }
@@ -777,7 +777,7 @@ export class SessionService {
             : 'The session is final. Request a correction instead, or ask an approver to reopen it.',
           { session_status: s.status },
         );
-      const settings = await readSettings(tx, c.tenantId, 'share');
+      const settings = await readSettings(tx, c.tenantId, 'update');
       assertEditWindow(
         c.principal,
         settings,
@@ -816,7 +816,7 @@ export class SessionService {
           .map((e) => ({ student_id: e.studentId, status_id: sid, remarks: o.markAll!.remarks }));
         if (!entries.length && o.markAll.statusId) {
           // still validate the status the caller named
-          const st = await loadStatuses(tx, c.tenantId, [o.markAll.statusId], 'share');
+          const st = await loadStatuses(tx, c.tenantId, [o.markAll.statusId], 'update');
           if (!st.has(o.markAll.statusId))
             throw validationIssue('status_id', 'Unknown attendance status');
         }
@@ -828,7 +828,7 @@ export class SessionService {
         const ex = existing.get(e.student_id);
         if (ex) ids.add(ex.statusId);
       }
-      const statuses = await loadStatuses(tx, c.tenantId, [...ids], 'share');
+      const statuses = await loadStatuses(tx, c.tenantId, [...ids], 'update');
 
       const issues: { path: string; code: string; message: string }[] = [];
       const at = (i: number, f: string) => (o.mode === 'bulk' ? `records.${i}.${f}` : f);
@@ -956,7 +956,7 @@ export class SessionService {
         throw new BusinessRuleError('INVALID_STATE', 'Only a draft session can be submitted', {
           session_status: s.status,
         });
-      const settings = await readSettings(tx, c.tenantId, 'share');
+      const settings = await readSettings(tx, c.tenantId, 'update');
       assertEditWindow(
         c.principal,
         settings,
@@ -1134,7 +1134,7 @@ export class SessionService {
             eq(attendanceCorrections.status, 'PENDING'),
           ),
         )
-        .for('share');
+        .for('update');
       if (pending.length)
         throw new BusinessRuleError(
           'OPERATION_NOT_ALLOWED',

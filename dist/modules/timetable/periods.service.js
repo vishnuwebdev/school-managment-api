@@ -134,7 +134,7 @@ export class PeriodService {
             .select()
             .from(subjectOfferings)
             .where(and(eq(subjectOfferings.id, input.subject_offering_id), eq(subjectOfferings.tenantId, tenantId)))
-            .for('share');
+            .for('update');
         if (!off)
             throw new NotFoundError('Subject offering');
         if (off.status !== 'ACTIVE')
@@ -149,7 +149,7 @@ export class PeriodService {
             .select()
             .from(teachingAssignments)
             .where(and(eq(teachingAssignments.tenantId, tenantId), eq(teachingAssignments.subjectOfferingId, off.id), eq(teachingAssignments.status, 'ACTIVE')))
-            .for('share');
+            .for('update');
         let a = active[0];
         if (input.teacher_id) {
             a = active.find((x) => x.teacherId === input.teacher_id);
@@ -172,7 +172,7 @@ export class PeriodService {
                 .select()
                 .from(timetableVenues)
                 .where(and(eq(timetableVenues.id, input.venue_id), eq(timetableVenues.tenantId, tenantId)))
-                .for('share');
+                .for('update');
             if (!v)
                 throw new NotFoundError('Venue');
             if (v.status !== 'ACTIVE')
