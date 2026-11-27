@@ -25,6 +25,7 @@ import { likeOf } from '../students/support.js';
 import type {
   AssignmentListQuery,
   CreateAssignmentBody,
+  CreateAssignmentsBody,
   EndAssignmentBody,
 } from './teachers.schemas.js';
 import {
@@ -300,104 +301,151 @@ export class AssignmentService {
     principal: Principal,
     actor: Actor,
   ) {
-    const id = await this.db.transaction(async (tx) => {
-      // Lock order: teacher → offering (share) → new row. Serialises with lifecycle commands.
-      const teacher = await loadTeacher(
-        tx,
-        tenantId,
-        teacherId,
-        principal,
-        'teachers.assignments.manage',
-        { lock: true },
-      );
-      if (teacher.status !== 'ACTIVE')
-        throw new BusinessRuleError(
-          'INVALID_STATE',
-          'Only active teachers can receive new teaching assignments',
-          { teacher_status: teacher.status },
-        );
-      const [offering] = await tx
-        .select({
-          o: subjectOfferings,
-          yearStatus: academicYears.status,
-          yearCode: academicYears.code,
-        })
-        .from(subjectOfferings)
-        .innerJoin(academicYears, eq(academicYears.id, subjectOfferings.academicYearId))
-        .where(
-          and(
-            eq(subjectOfferings.id, input.subject_offering_id),
-            eq(subjectOfferings.tenantId, tenantId),
-          ),
-        )
-        .for('update');
-      if (!offering) throw new NotFoundError('Subject offering');
-      if (offering.o.status !== 'ACTIVE')
-        throw new BusinessRuleError(
-          'OPERATION_NOT_ALLOWED',
-          'The subject offering is inactive and cannot be assigned',
-          { offering_status: offering.o.status },
-        );
-      if (offering.yearStatus !== 'UPCOMING' && offering.yearStatus !== 'ACTIVE')
-        throw new BusinessRuleError(
-          'OPERATION_NOT_ALLOWED',
-          'Teachers can only be assigned to offerings of an upcoming or active academic year',
-          { academic_year_status: offering.yearStatus },
-        );
-      const [dup] = await tx
-        .select({ id: teachingAssignments.id })
-        .from(teachingAssignments)
-        .where(
-          and(
-            eq(teachingAssignments.tenantId, tenantId),
-            eq(teachingAssignments.teacherId, teacherId),
-            eq(teachingAssignments.subjectOfferingId, input.subject_offering_id),
-            eq(teachingAssignments.status, 'ACTIVE'),
-          ),
-        )
-        .for('update');
-      if (dup) throw this.duplicate(dup.id);
-      const start = input.start_date ?? todayIso(this.deps.clock);
-      let newId: string;
-      try {
-        const [ins] = await tx
-          .insert(teachingAssignments)
-          .values({
-            tenantId,
-            teacherId,
-            subjectOfferingId: input.subject_offering_id,
-            role: input.role,
-            status: 'ACTIVE',
-            startDate: start,
-            reason: input.reason ?? null,
-            createdBy: actor.userId,
-            updatedBy: actor.userId,
-          })
-          .$returningId();
-        newId = ins!.id;
-      } catch (err) {
-        if (isDuplicateKeyError(err)) throw this.duplicate();
-        throw err;
-      }
-      const view = await this.get(tenantId, newId, principal, tx);
-      await addTeacherHistory(tx, actor, tenantId, teacherId, {
-        eventType: 'TEACHING_ASSIGNED',
-        effectiveDate: start,
-        reason: input.reason ?? null,
-        details: this.historyDetails(view),
-      });
-      await recordChange(tx, actor, tenantId, {
-        action: 'TEACHING_ASSIGNMENT_CREATED',
-        entityType: 'teaching_assignment',
-        entityId: newId,
-        event: 'teaching_assignment.created',
-        after: view,
-        payload: this.eventPayload(view),
-      });
-      return newId;
-    });
+    const id = await this.db.transaction((tx) =>
+      this.createInTx(tx, tenantId, teacherId, input, principal, actor),
+    );
     await refreshTeacherAccess(this.deps, tenantId);
     return this.get(tenantId, id, principal);
+  }
+
+  /**
+   * Assign the teacher to several subject offerings at once (e.g. three subjects of
+   * Class 5A). All or nothing: one invalid offering or duplicate saves none.
+   */
+  async createMany(
+    tenantId: string,
+    teacherId: string,
+    input: z.infer<typeof CreateAssignmentsBody>,
+    principal: Principal,
+    actor: Actor,
+  ) {
+    const offeringIds = [...new Set(input.subject_offering_ids)];
+    const ids = await this.db.transaction(async (tx) => {
+      const out: string[] = [];
+      for (const subject_offering_id of offeringIds)
+        out.push(
+          await this.createInTx(
+            tx,
+            tenantId,
+            teacherId,
+            {
+              subject_offering_id,
+              role: input.role,
+              start_date: input.start_date,
+              reason: input.reason,
+            },
+            principal,
+            actor,
+          ),
+        );
+      return out;
+    });
+    await refreshTeacherAccess(this.deps, tenantId);
+    return Promise.all(ids.map((id) => this.get(tenantId, id, principal)));
+  }
+
+  private async createInTx(
+    tx: Executor,
+    tenantId: string,
+    teacherId: string,
+    input: z.infer<typeof CreateAssignmentBody>,
+    principal: Principal,
+    actor: Actor,
+  ): Promise<string> {
+    // Lock order: teacher → offering (share) → new row. Serialises with lifecycle commands.
+    const teacher = await loadTeacher(
+      tx,
+      tenantId,
+      teacherId,
+      principal,
+      'teachers.assignments.manage',
+      { lock: true },
+    );
+    if (teacher.status !== 'ACTIVE')
+      throw new BusinessRuleError(
+        'INVALID_STATE',
+        'Only active teachers can receive new teaching assignments',
+        { teacher_status: teacher.status },
+      );
+    const [offering] = await tx
+      .select({
+        o: subjectOfferings,
+        yearStatus: academicYears.status,
+        yearCode: academicYears.code,
+      })
+      .from(subjectOfferings)
+      .innerJoin(academicYears, eq(academicYears.id, subjectOfferings.academicYearId))
+      .where(
+        and(
+          eq(subjectOfferings.id, input.subject_offering_id),
+          eq(subjectOfferings.tenantId, tenantId),
+        ),
+      )
+      .for('update');
+    if (!offering) throw new NotFoundError('Subject offering');
+    if (offering.o.status !== 'ACTIVE')
+      throw new BusinessRuleError(
+        'OPERATION_NOT_ALLOWED',
+        'The subject offering is inactive and cannot be assigned',
+        { offering_status: offering.o.status },
+      );
+    if (offering.yearStatus !== 'UPCOMING' && offering.yearStatus !== 'ACTIVE')
+      throw new BusinessRuleError(
+        'OPERATION_NOT_ALLOWED',
+        'Teachers can only be assigned to offerings of an upcoming or active academic year',
+        { academic_year_status: offering.yearStatus },
+      );
+    const [dup] = await tx
+      .select({ id: teachingAssignments.id })
+      .from(teachingAssignments)
+      .where(
+        and(
+          eq(teachingAssignments.tenantId, tenantId),
+          eq(teachingAssignments.teacherId, teacherId),
+          eq(teachingAssignments.subjectOfferingId, input.subject_offering_id),
+          eq(teachingAssignments.status, 'ACTIVE'),
+        ),
+      )
+      .for('update');
+    if (dup) throw this.duplicate(dup.id);
+    const start = input.start_date ?? todayIso(this.deps.clock);
+    let newId: string;
+    try {
+      const [ins] = await tx
+        .insert(teachingAssignments)
+        .values({
+          tenantId,
+          teacherId,
+          subjectOfferingId: input.subject_offering_id,
+          role: input.role,
+          status: 'ACTIVE',
+          startDate: start,
+          reason: input.reason ?? null,
+          createdBy: actor.userId,
+          updatedBy: actor.userId,
+        })
+        .$returningId();
+      newId = ins!.id;
+    } catch (err) {
+      if (isDuplicateKeyError(err)) throw this.duplicate();
+      throw err;
+    }
+    const view = await this.get(tenantId, newId, principal, tx);
+    await addTeacherHistory(tx, actor, tenantId, teacherId, {
+      eventType: 'TEACHING_ASSIGNED',
+      effectiveDate: start,
+      reason: input.reason ?? null,
+      details: this.historyDetails(view),
+    });
+    await recordChange(tx, actor, tenantId, {
+      action: 'TEACHING_ASSIGNMENT_CREATED',
+      entityType: 'teaching_assignment',
+      entityId: newId,
+      event: 'teaching_assignment.created',
+      after: view,
+      payload: this.eventPayload(view),
+    });
+    return newId;
   }
 
   private duplicate(existingId?: string) {

@@ -224,6 +224,11 @@ export const StudentListQuery = PaginationQuery.extend({
   section_id: z.uuid().optional(),
   /** true = has an open enrollment, false = has none. */
   enrolled: z.stringbool().optional(),
+  /**
+   * true = the Admissions "needs action" list: Admitted students (not active yet), and
+   * Active students with no class, or in a class that has sections but with none chosen.
+   */
+  needs_placement: z.stringbool().optional(),
 });
 export const StudentCommands = [
   'admit',

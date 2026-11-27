@@ -163,6 +163,17 @@ export class StudentService {
       const open = sql`exists (select 1 from ${enrollments} where ${enrollments.tenantId} = ${students.tenantId} and ${enrollments.studentId} = ${students.id} and ${inArray(enrollments.status, OPEN)})`;
       conds.push(q.enrolled ? open : sql`not ${open}`);
     }
+    if (q.needs_placement) {
+      const anyOpen = sql`exists (select 1 from ${enrollments} where ${enrollments.tenantId} = ${students.tenantId} and ${enrollments.studentId} = ${students.id} and ${inArray(enrollments.status, OPEN)})`;
+      // Open enrollment without a section, in a class that has active sections that year.
+      const noSection = sql`exists (select 1 from ${enrollments} where ${enrollments.tenantId} = ${students.tenantId} and ${enrollments.studentId} = ${students.id} and ${inArray(enrollments.status, OPEN)} and ${enrollments.sectionId} is null and exists (select 1 from ${academicSections} where ${academicSections.tenantId} = ${enrollments.tenantId} and ${academicSections.classId} = ${enrollments.classId} and ${academicSections.academicYearId} = ${enrollments.academicYearId} and ${academicSections.status} = 'ACTIVE'))`;
+      conds.push(
+        or(
+          eq(students.status, 'ADMITTED'),
+          and(eq(students.status, 'ACTIVE'), or(sql`not ${anyOpen}`, noSection)),
+        ),
+      );
+    }
     if (q.search) {
       const s = likeOf(q.search);
       conds.push(

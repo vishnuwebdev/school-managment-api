@@ -70,17 +70,23 @@ const hexColor = z
   .nullable()
   .optional();
 
+/**
+ * True for any IANA time zone the runtime knows, including aliases. Do not use
+ * Intl.supportedValuesOf('timeZone'): it lists only one name per zone and, in Node,
+ * uses older names (e.g. 'Asia/Calcutta'), so it rejects 'Asia/Kolkata'.
+ */
+export function isValidTimeZone(tz: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export const SettingsBody = z.object({
   version: z.number().int().positive(),
-  timezone: z
-    .string()
-    .min(1)
-    .max(64)
-    .refine(
-      (tz) => Intl.supportedValuesOf('timeZone').includes(tz) || tz === 'UTC',
-      'Unknown time zone',
-    )
-    .optional(),
+  timezone: z.string().min(1).max(64).refine(isValidTimeZone, 'Unknown time zone').optional(),
   locale: z.string().min(2).max(16).optional(),
   currency: z.string().length(3).toUpperCase().optional(),
   date_format: z.enum(['DD/MM/YYYY', 'MM/DD/YYYY', 'YYYY-MM-DD', 'DD-MM-YYYY']).optional(),

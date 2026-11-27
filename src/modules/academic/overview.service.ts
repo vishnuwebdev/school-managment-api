@@ -59,8 +59,10 @@ export class ClassOverviewService {
         ),
       )
       .orderBy(asc(academicSections.code));
+    // Grouped by class AND section: a student enrolled in a class without a section
+    // still counts for that class (and shows as "not in a section yet").
     const seats = await this.db
-      .select({ sectionId: enrollments.sectionId, n: count() })
+      .select({ classId: enrollments.classId, sectionId: enrollments.sectionId, n: count() })
       .from(enrollments)
       .where(
         and(
@@ -69,9 +71,15 @@ export class ClassOverviewService {
           inArray(enrollments.status, OPEN),
         ),
       )
-      .groupBy(enrollments.sectionId);
-    const noSection = seats.find((s) => s.sectionId === null);
-    const enrolledBy = new Map(seats.filter((s) => s.sectionId).map((s) => [s.sectionId!, s.n]));
+      .groupBy(enrollments.classId, enrollments.sectionId);
+    const enrolledBy = new Map<string, number>();
+    const noSectionBy = new Map<string, number>();
+    for (const r of seats) {
+      if (r.sectionId)
+        enrolledBy.set(r.sectionId, (enrolledBy.get(r.sectionId) ?? 0) + Number(r.n));
+      else noSectionBy.set(r.classId, (noSectionBy.get(r.classId) ?? 0) + Number(r.n));
+    }
+    let totalUnplaced = 0;
 
     const heads = await this.db
       .select({
@@ -155,7 +163,7 @@ export class ClassOverviewService {
               type: 'OVER_CAPACITY',
               class_id: c.id,
               section_id: s.id,
-              text: `${c.name} · ${s.name} has ${enrolled - s.capacity!} more ltudent(s) than its ${s.capacity} seats`,
+              text: `${c.name} · ${s.name} has ${enrolled - s.capacity!} more student(s) than its ${s.capacity} seats`,
             });
           if (!head && live)
             attention.push({
@@ -180,7 +188,9 @@ export class ClassOverviewService {
               : null,
           };
         });
-      const enrolled = secs.reduce((a, s) => a + s.enrolled_count, 0);
+      const unplaced = noSectionBy.get(c.id) ?? 0;
+      const enrolled = secs.reduce((a, s) => a + s.enrolled_count, 0) + unplaced;
+      totalUnplaced += unplaced;
       const capacity = secs.reduce((a, s) => a + (s.capacity ?? 0), 0);
       totalEnrolled += enrolled;
       totalCapacity += capacity;
@@ -198,6 +208,8 @@ export class ClassOverviewService {
         version: c.version,
         sections: secs,
         enrolled,
+        /** Enrolled in this class this year but not in any section. */
+        unplaced,
         capacity,
         subjects: subjectsBy.get(c.id) ?? 0,
         sections_with_teacher: secs.filter((s) => s.class_teacher).length,
@@ -217,7 +229,7 @@ export class ClassOverviewService {
         enrolled: totalEnrolled,
         capacity: totalCapacity,
         sections_without_teacher: withoutTeacher,
-        unplaced: Number(noSection?.n ?? 0), // enrolled in a class but not in a section
+        unplaced: totalUnplaced, // enrolled in a class but not in a section
       },
       attention,
     };

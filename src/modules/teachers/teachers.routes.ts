@@ -10,6 +10,7 @@ import {
   AssignmentListQuery,
   ClassTeacherListQuery,
   CreateAssignmentBody,
+  CreateAssignmentsBody,
   CreateAssignmentWithTeacherBody,
   CreateTeacherBody,
   EndAssignmentBody,
@@ -407,6 +408,22 @@ export function teacherRoutes(
       status: 201,
       handler: async ({ params, body, req }) => ({
         data: await assignments.create(tid(req), params.id, body, me(req), actorFrom(req.ctx)),
+      }),
+    }),
+    defineRoute({
+      method: 'post',
+      path: '/teachers/:id/assignments/bulk',
+      summary:
+        'Assign the teacher to several subject offerings at once (same rules as one). ' +
+        'All or nothing: if any offering is invalid or already assigned, none are saved.',
+      tags: TAG_A,
+      access: 'tenant',
+      permissions: ['teachers.assignments.manage'],
+      params: IdParams,
+      body: CreateAssignmentsBody,
+      status: 201,
+      handler: async ({ params, body, req }) => ({
+        data: await assignments.createMany(tid(req), params.id, body, me(req), actorFrom(req.ctx)),
       }),
     }),
     defineRoute({

@@ -173,6 +173,13 @@ export const CreateAssignmentBody = z.object({
   start_date: IsoDate.optional(),
   reason: z.string().trim().max(500).optional(),
 });
+/** Several subjects at once (e.g. Maths, Science and English of Class 5A). All or nothing. */
+export const CreateAssignmentsBody = z.object({
+  subject_offering_ids: z.array(z.uuid()).min(1).max(50),
+  role: z.enum(ASSIGNMENT_ROLE).default('PRIMARY'),
+  start_date: IsoDate.optional(),
+  reason: z.string().trim().max(500).optional(),
+});
 export const CreateAssignmentWithTeacherBody = CreateAssignmentBody.extend({
   teacher_id: z.uuid(),
 });
